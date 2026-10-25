@@ -1,0 +1,6 @@
+data/*.json
+data/*.gpx
+data/*.fit
+data/*.gz
+*.cache/
+__pycache__/
