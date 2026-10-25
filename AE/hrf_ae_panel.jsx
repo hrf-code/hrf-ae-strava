@@ -1,5 +1,5 @@
 ﻿/*
-  HRF — panel danych Strava dla After Effects (v14.5, wersja testowa)
+  HRF — panel danych Strava dla After Effects (v14.6, wersja testowa)
   -----------------------------------------------------------------
   Uruchomienie: Plik > Skrypt > Uruchom plik skryptu... > hrf_ae_panel.jsx
   (otwiera się małe okno-panel, które zostaje na wierzchu; wymaga zezwolenia
@@ -54,7 +54,7 @@ var HRF_FIELDS = [
     ["lat", "SZEROKOSC GPS", 'val("lat").toFixed(5);'],
     ["lng", "DLUGOSC GPS", 'val("lng").toFixed(5);']
 ];
-var HRF_VERSION = "v14.5";   // podnoś przy zmianach widocznych dla użytkownika; czas buildu panel bierze z daty modyfikacji pliku
+var HRF_VERSION = "v14.6";   // podnoś przy zmianach widocznych dla użytkownika; czas buildu panel bierze z daty modyfikacji pliku
 
 // średnia wartości tablicy w oknie +/- w próbek wokół indeksu i (wygładzanie wysokości)
 function hrfAvgAround(arr, i, w) {
@@ -726,6 +726,7 @@ function hrfBuildClip(D, o) {
                     '[' + (FL / 2) + '-(rx*cs-ry*sn),' + (FL / 2) + '-(rx*sn+ry*cs)];';
             };
 
+            var SC = KW / MS;                  // powiększenie małego rysunku do px świata (kształty rysujemy w skali ramki MS x MS)
             // ----- otoczenie z OSM (opcjonalnie): zieleń, woda, budynki, drogi, nazwy ulic -----
             if (OSM) {
                 var PXM = WKM / 1000;  // px świata na metr
@@ -758,6 +759,11 @@ function hrfBuildClip(D, o) {
                 var cvt = function (ll) {
                     return [(ll[1] - lngMid) * cosLat * mapSc * KW, -(ll[0] - latMid) * mapSc * KW];
                 };
+                // kształty OSM w małej skali (jak trasa); napisy mają pozycję w px świata (cvt)
+                var cvtS = function (ll) {
+                    var c = cvt(ll);
+                    return [c[0] / SC, c[1] / SC];
+                };
                 var osmLayer = function (nm, list, closed, filled, wpx, op) {
                     list = filt(list);
                     if (!list.length) return;
@@ -768,7 +774,7 @@ function hrfBuildClip(D, o) {
                     var oi, oj, pts, shp, sg;
                     for (oi = 0; oi < list.length; oi++) {
                         pts = [];
-                        for (oj = 0; oj < list[oi].length; oj++) pts.push(cvt(list[oi][oj]));
+                        for (oj = 0; oj < list[oi].length; oj++) pts.push(cvtS(list[oi][oj]));
                         shp = new Shape();
                         shp.vertices = pts;
                         shp.closed = closed;
@@ -780,14 +786,14 @@ function hrfBuildClip(D, o) {
                     } else {
                         var os2 = ov.addProperty("ADBE Vector Graphic - Stroke");
                         os2.property("ADBE Vector Stroke Color").setValue([1, 1, 1]);
-                        os2.property("ADBE Vector Stroke Width").setValue(wpx);
+                        os2.property("ADBE Vector Stroke Width").setValue(wpx / SC);
                         try {
                             os2.property("ADBE Vector Stroke Line Cap").setValue(2);
                             os2.property("ADBE Vector Stroke Line Join").setValue(2);
                         } catch (ec) {}
                     }
                     sl.property("ADBE Transform Group").property("ADBE Opacity").setValue(op);
-                    place(sl, 0, 0, 0);
+                    place(sl, 0, 0, 0, SC);
                 };
                 osmLayer("OSM green", OSM.green, true, true, 0, 12);
                 osmLayer("OSM water", OSM.water, true, true, 0, 28);
@@ -816,7 +822,6 @@ function hrfBuildClip(D, o) {
 
             // trasa, siatka i ślad są rysowane w małej skali (jak mapa 2D: ramka MS x MS), a warstwy dostają Scale = SC.
             // Ścieżki w pikselach świata (do +/-40 tys. px) rozjeżdżały się w AE (skoki trasy w obie strony).
-            var SC = KW / MS;                  // powiększenie małego rysunku do px świata
             var rp = [], rz = [], gstep = Math.max(1, Math.ceil(N / ROUTE_PTS));
             var bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9, wx, wy;
             for (i = 0; i < N; i += gstep) {

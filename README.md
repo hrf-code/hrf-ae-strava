@@ -18,8 +18,11 @@ Nakładka danych (prędkość, tętno, wysokość, mapa, mini mapa 3D, profil…
 3. W After Effects uruchom `AE/hrf_ae_panel.jsx`.
    „Wczytaj dane…” → wskaż `*_hrf.json`; zaznacz wideo w panelu Projekt → „Dodaj klip…”.
    „Odśwież dane” podmienia wartości we wszystkich klipach.
-4. (opcjonalnie) otoczenie z OSM: `py tools/hrf_osm_fetch.py <dane>.json hrf_osm.json`,
-   potem w panelu zaznacz „Otoczenie z OSM”.
+4. (opcjonalnie) otoczenie z OSM: `py tools/hrf_osm_fetch.py data/<nazwa>_hrf.json data/hrf_osm.json`,
+   potem w panelu zaznacz „Otoczenie z OSM”. Narzędzie pokazuje plan (ile odcinków z pamięci podręcznej,
+   ile do pobrania) i pyta o zgodę, a w trakcie postęp, próby, błędy i szacowany czas.
+   **Ctrl+C przerywa w dowolnej chwili**, a ponowne uruchomienie dociąga tylko brakujące odcinki
+   (`--yes` pomija pytanie, `--force` pobiera od nowa).
 
 ## Struktura
 ```
