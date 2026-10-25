@@ -4,3 +4,6 @@ data/*.fit
 data/*.gz
 *.cache/
 __pycache__/
+
+# Pliki lokalne (testy, tymczasowe, notatki) - zostaja na dysku, nie ida na GitHub
+_local/
