@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-hrf_konwerter.py  —  zamienia plik FIT albo GPX (np. pobrany ze Stravy) na hrf_ae_dane_v2.json
-dla panelu After Effects (hrf_ae_panel.jsx).
+hrf_converter.py  —  zamienia plik FIT albo GPX (np. pobrany ze Stravy) na <nazwa>_hrf.json
+dla panelu After Effects (AE/hrf_ae_panel.jsx).
 
 Pobieranie pliku ze Stravy: aktywność -> menu "..." -> "Eksportuj oryginał" (FIT/GPX z urządzenia)
 albo "Eksportuj GPX".
 
-Najprościej: wrzuć plik .fit/.gpx do folderu z tym skryptem i uruchom bez argumentów:
-    py hrf_konwerter.py
-Skrypt przeszuka folder, a dla każdego pliku utworzy obok <nazwa>_hrf.json
-(gotowe pliki pomija; --wymus przelicza ponownie). Działa też na .gpx.gz / .fit.gz
+Najprościej: wrzuć plik .fit/.gpx do folderu data/ i uruchom bez argumentów:
+    py tools/hrf_converter.py
+Skrypt przeszuka folder data/, a dla każdego pliku utworzy obok <nazwa>_hrf.json
+(gotowe pliki pomija; --force przelicza ponownie). Działa też na .gpx.gz / .fit.gz
 z eksportu całego konta Stravy.
 
 Pojedynczy plik / opcje (Windows: zamiast python3 wpisz py):
-    py hrf_konwerter.py aktywnosc.gpx
-    py hrf_konwerter.py aktywnosc.fit --nazwa "Przehyba" --start NS --meta PRZ
-    py hrf_konwerter.py aktywnosc.gpx --podjazdy 902 --czas-ruchu 12216 --dystans 59.6
+    py hrf_converter.py aktywnosc.gpx
+    py hrf_converter.py aktywnosc.fit --name "Przehyba" --start NS --meta PRZ
+    py hrf_converter.py aktywnosc.gpx --ascent 902 --moving-time 12216 --distance 59.6
 
 Opcje:
-  -o PLIK            plik wyjściowy (tylko dla pojedynczego pliku; domyślnie <nazwa>_hrf.json)
-  --nazwa TEKST      nazwa aktywności (domyślnie z GPX albo z nazwy pliku)
+  -o, --output PLIK  plik wyjściowy (tylko dla pojedynczego pliku; domyślnie <nazwa>_hrf.json)
+  --name TEKST       nazwa aktywności (domyślnie z GPX albo z nazwy pliku)
   --start KOD --meta KOD   skróty miejscowości na mapie (domyślnie START / META)
   --id NUMER         numer aktywności (domyślnie cyfry z nazwy pliku)
-  --strefy A,B,C,D   górne granice stref tętna Z1-Z4 (domyślnie 116,145,159,174)
-  --strefa NAZWA     strefa czasowa lokalnego czasu startu, np. Europe/Warsaw
+  --zones A,B,C,D    górne granice stref tętna Z1-Z4 (domyślnie 116,145,159,174)
+  --zone NAZWA       strefa czasowa lokalnego czasu startu, np. Europe/Warsaw
                      (domyślnie strefa tego komputera)
-  --podjazdy M --czas-ruchu S --dystans KM
+  --ascent M --moving-time S --distance KM
                      dopasowanie sum do wartości ze strony Stravy (opcjonalne);
                      bez tego sumy liczą się z samego pliku i mogą się nieco różnić.
 
@@ -257,8 +257,8 @@ def build(pts, args, name_from_file):
             d = hav(lat[i - 1], lon[i - 1], lat[i], lon[i])
         dist.append(dist[-1] + d)
     dist_scale = 1.0
-    if args.dystans:
-        dist_scale = args.dystans * 1000.0 / dist[-1]
+    if args.distance:
+        dist_scale = args.distance * 1000.0 / dist[-1]
     dist = [d * dist_scale for d in dist]
     total_km = dist[-1] / 1000.0
 
@@ -281,14 +281,14 @@ def build(pts, args, name_from_file):
         dt = min(time_s[i] - time_s[i - 1], 5)             # przerwy >5 s to pauza
         mov.append(mov[-1] + (dt if moving[i] else 0))
     moving_scale = 1.0
-    if args.czas_ruchu and mov[-1] > 0:
-        moving_scale = args.czas_ruchu / mov[-1]
+    if args.moving_time and mov[-1] > 0:
+        moving_scale = args.moving_time / mov[-1]
     mov = [m * moving_scale for m in mov]
 
     gain, loss = ascent_descent(elev)
     gain_scale = 1.0
-    if args.podjazdy and gain[-1] > 0:
-        gain_scale = args.podjazdy / gain[-1]
+    if args.ascent and gain[-1] > 0:
+        gain_scale = args.ascent / gain[-1]
     gain = [g * gain_scale for g in gain]
     loss = [l * gain_scale for l in loss]
 
@@ -326,7 +326,7 @@ def build(pts, args, name_from_file):
         hr.append(lasth)
     firsth = next((h for h in hr if h is not None), 0)
     hr = [int(round(firsth if h is None else h)) for h in hr]
-    zones = [0] + args.strefy + [999]
+    zones = [0] + args.zones + [999]
     zlist = [[zones[k] if k == 0 else zones[k] + 1, zones[k + 1]] for k in range(5)]
     zlist[0] = [0, zones[1]]
     hr_zone = []
@@ -381,18 +381,18 @@ def build(pts, args, name_from_file):
 
     # czas startu: lokalny zegar
     st = pts[0]["t"]
-    if args.strefa:
+    if args.zone:
         try:
             from zoneinfo import ZoneInfo
-            stl = st.astimezone(ZoneInfo(args.strefa))
+            stl = st.astimezone(ZoneInfo(args.zone))
         except Exception as e:
-            sys.exit("Nieznana strefa czasowa %s (%s). Na Windowsie: py -m pip install tzdata" % (args.strefa, e))
+            sys.exit("Nieznana strefa czasowa %s (%s). Na Windowsie: py -m pip install tzdata" % (args.zone, e))
     else:
         stl = st.astimezone()
     start_local = stl.strftime("%Y-%m-%dT%H:%M:%S")
 
-    name = args.nazwa or name_from_file
-    act_id = args.id or "".join(re.findall(r"\d+", os.path.basename(args.plik)))[:20] or "0"
+    name = args.name or name_from_file
+    act_id = args.id or "".join(re.findall(r"\d+", os.path.basename(args.file)))[:20] or "0"
 
     r1 = lambda a: [round(x, 1) for x in a]
     D = {
@@ -462,7 +462,7 @@ def convert_one(path, out, args):
             os.unlink(src)
     if not name:
         name = os.path.splitext(os.path.basename(path[:-3] if gz else path))[0]
-    args.plik = path
+    args.file = path
     D = build(pts, args, name)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(D, f, ensure_ascii=False, separators=(",", ":"))
@@ -481,33 +481,33 @@ def convert_one(path, out, args):
 
 def main():
     ap = argparse.ArgumentParser(description="FIT/GPX -> JSON dla panelu AE (bez argumentów: przeszukuje folder data/)")
-    ap.add_argument("plik", nargs="?", help="plik .fit/.gpx albo folder; bez tego – folder data/ obok tools/")
-    ap.add_argument("-o", "--wyjscie", help="plik wyjściowy (tylko dla pojedynczego pliku)")
-    ap.add_argument("--nazwa")
+    ap.add_argument("file", nargs="?", help="plik .fit/.gpx albo folder; bez tego – folder data/ obok tools/")
+    ap.add_argument("-o", "--output", help="plik wyjściowy (tylko dla pojedynczego pliku)")
+    ap.add_argument("--name")
     ap.add_argument("--start")
     ap.add_argument("--meta")
     ap.add_argument("--id")
-    ap.add_argument("--strefy", default="116,145,159,174")
-    ap.add_argument("--strefa")
-    ap.add_argument("--podjazdy", type=float)
-    ap.add_argument("--czas-ruchu", dest="czas_ruchu", type=float)
-    ap.add_argument("--dystans", type=float)
-    ap.add_argument("--wymus", action="store_true", help="przelicz także pliki, które mają już gotowy JSON")
+    ap.add_argument("--zones", default="116,145,159,174")
+    ap.add_argument("--zone")
+    ap.add_argument("--ascent", type=float)
+    ap.add_argument("--moving-time", dest="moving_time", type=float)
+    ap.add_argument("--distance", type=float)
+    ap.add_argument("--force", action="store_true", help="przelicz także pliki, które mają już gotowy JSON")
     args = ap.parse_args()
     try:
-        args.strefy = [int(x) for x in args.strefy.split(",")]
-        assert len(args.strefy) == 4
+        args.zones = [int(x) for x in args.zones.split(",")]
+        assert len(args.zones) == 4
     except Exception:
-        sys.exit("--strefy podaj jako cztery liczby: 116,145,159,174")
+        sys.exit("--zones podaj jako cztery liczby: 116,145,159,174")
 
     ui_box(["HRF  -  konwerter FIT/GPX na dane dla After Effects",
             "Wrzuć plik .fit lub .gpx do folderu data/ i uruchom skrypt."])
-    target = args.plik
+    target = args.file
     if target and os.path.isfile(target):
         if target.lower().endswith((".fit", ".fit.gz")) and not ensure_fitparse():
             return
         ui_head(os.path.basename(target))
-        out = args.wyjscie or os.path.splitext(target if not target.lower().endswith(".gz") else target[:-3])[0] + "_hrf.json"
+        out = args.output or os.path.splitext(target if not target.lower().endswith(".gz") else target[:-3])[0] + "_hrf.json"
         convert_one(target, out, args)
         return
 
@@ -539,8 +539,8 @@ def main():
         base = path[:-3] if path.lower().endswith(".gz") else path
         out = os.path.splitext(base)[0] + "_hrf.json"
         ui_head(f)
-        if os.path.exists(out) and not args.wymus and os.path.getmtime(out) >= os.path.getmtime(path):
-            ui_info("Pomijam – JSON już jest (opcja --wymus przelicza ponownie).")
+        if os.path.exists(out) and not args.force and os.path.getmtime(out) >= os.path.getmtime(path):
+            ui_info("Pomijam – JSON już jest (opcja --force przelicza ponownie).")
             skipped += 1
             continue
         if f.lower().endswith((".fit", ".fit.gz")):
@@ -563,8 +563,8 @@ def main():
     ui_info("Przeliczone: %d,  pominięte (już gotowe): %d,  błędy: %d" % (done, skipped, failed))
     if done:
         ui_info("W panelu AE kliknij 'Wczytaj dane...' i wskaż plik *_hrf.json.")
-        ui_info("Sumy możesz wyrównać do Stravy: --podjazdy / --czas-ruchu / --dystans")
-        ui_info("(dla pojedynczego pliku, np.: py hrf_konwerter.py plik.gpx --podjazdy 902)")
+        ui_info("Sumy możesz wyrównać do Stravy: --ascent / --moving-time / --distance")
+        ui_info("(dla pojedynczego pliku, np.: py hrf_converter.py plik.gpx --ascent 902)")
 
 
 if __name__ == "__main__":

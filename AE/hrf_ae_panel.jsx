@@ -1,5 +1,5 @@
 ﻿/*
-  HRF — panel danych Strava dla After Effects (v14, wersja testowa)
+  HRF — panel danych Strava dla After Effects (v14.1, wersja testowa)
   -----------------------------------------------------------------
   Uruchomienie: Plik > Skrypt > Uruchom plik skryptu... > hrf_ae_panel.jsx
   (otwiera się małe okno-panel, które zostaje na wierzchu; wymaga zezwolenia
@@ -9,10 +9,10 @@
     * Dane aktywności leżą w JEDNEJ kompozycji "HRF_DATA" (cała jazda, czas =
       sekundy od startu aktywności). Wszystkie klipy czytają z niej.
     * Każdy klip (wideo z tej samej jazdy) dostaje własne kompozycje
-      "HRF_NAKLAD - <nazwa wideo>", mapę, profil i mini mapę 3D. Na warstwie
+      "HRF_OVERLAY - <nazwa wideo>", mapę, profil i mini mapę 3D. Na warstwie
       CONTROLS klipu jest "Start offset (s)" = sekundy od startu aktywności
       do pierwszej klatki klipu oraz "Shift (s)" do ręcznego dopasowania.
-    * "Wczytaj dane" – wskaż JSON (hrf_ae_dane_v2.json). "Odśwież dane" –
+    * "Wczytaj dane" – wskaż JSON (<nazwa>_hrf.json). "Odśwież dane" –
       czyta ten sam plik ponownie i podmienia wartości w HRF_DATA, więc
       wszystkie klipy odświeżają się od razu. (Gdy zmieni się sama trasa,
       usuń stare klipy i dodaj je jeszcze raz.)
@@ -25,6 +25,20 @@ var HRF_REQUIRED = ["speed_kmh", "hr", "elev_m", "dist_km", "grade_pct", "gain_m
     "avg_speed_kmh", "max_speed_kmh", "avg_hr", "max_hr", "vam_mh", "moving_s", "hr_zone",
     "lat", "lng", "progress_pct", "remain_km", "heading_unw"];
 var HRF_MS = 1080;   // bok prekompu z mapą
+var hrfStale = {};   // nazwa -> nieaktualny prekomp (zmieniony na "(old)"), czeka na podmianę w klipach
+var HRF_VERSION = "v14.1";   // podnoś przy zmianach widocznych dla użytkownika; czas buildu panel bierze z daty modyfikacji pliku
+
+function hrfPad2(n) { return (n < 10 ? "0" : "") + n; }
+
+// Data i godzina ostatniej zmiany pliku skryptu (= czas builda) – widoczna w panelu, żeby sprawdzić, czy działa najnowsza wersja
+function hrfBuildStamp() {
+    try {
+        var m = new File($.fileName).modified;
+        if (!m) return "?";
+        return m.getFullYear() + "-" + hrfPad2(m.getMonth() + 1) + "-" + hrfPad2(m.getDate()) + " " +
+            hrfPad2(m.getHours()) + ":" + hrfPad2(m.getMinutes()) + ":" + hrfPad2(m.getSeconds());
+    } catch (e) { return "?"; }
+}
 
 // ---------- funkcje pomocnicze ----------
 function hrfParseClock(s) {
@@ -219,7 +233,7 @@ function hrfReadJson(file) {
     for (var q = 0; q < HRF_REQUIRED.length; q++) {
         if (!S[HRF_REQUIRED[q]] || S[HRF_REQUIRED[q]].length != S.time_s.length) missing.push(HRF_REQUIRED[q]);
     }
-    if (missing.length) throw new Error("Brakuje serii: " + missing.join(", ") + ". Użyj pliku hrf_ae_dane_v2.json.");
+    if (missing.length) throw new Error("Brakuje serii: " + missing.join(", ") + ". Użyj pliku <nazwa>_hrf.json.");
     return D;
 }
 
@@ -313,8 +327,58 @@ function hrfWriteData(D, filePath, progress) {
         inc = hrfIncreasing(S.time_s, dots[dn][1], K);
         dd2.property("ADBE Transform Group").property("ADBE Position").setValuesAtTimes(inc.t, inc.v);
     }
-    dcomp.comment = "id=" + String(D.activity_id || "") + "|start=" + String(D.start_date_local || "") + "|n=" + N + "|k=" + K + "|file=" + String(filePath || "");
+    dcomp.comment = "id=" + String(D.activity_id || "") + "|start=" + String(D.start_date_local || "") + "|n=" + N + "|k=" + K + "|sig=" + hrfGeomSig(G) + "|file=" + String(filePath || "");
     return dcomp;
+}
+
+// Podpis geometrii trasy i profilu. Wspólne prekompy (mapa, profil, mini mapa 3D) mają trasę wpisaną na stałe,
+// więc zapisujemy w ich komentarzu, dla jakiej trasy powstały.
+function hrfGeomSig(G) {
+    // ostatni człon = wersja rysowania prekompów; po zmianie kodu mapy/profilu podnieś go, a stare prekomp zbudują się od nowa
+    return [G.latMid.toFixed(5), G.lngMid.toFixed(5), G.mapSc.toFixed(3), Math.round(G.eMin), Math.round(G.eMax), G.distTotal.toFixed(2), "r2"].join("/");
+}
+
+// Zwraca wspólny prekomp tylko wtedy, gdy powstał dla tej samej trasy. Nieaktualny dostaje " (old)",
+// dzięki czemu klip zbuduje go od nowa; potem hrfAdopt podmienia go w klipach zrobionych wcześniej.
+function hrfFreshComp(name, sig) {
+    var c = hrfFindComp(name);
+    if (!c) return null;
+    if (String(c.comment) == "sig=" + sig) return c;
+    c.name = name + " (old)";
+    hrfStale[name] = c;
+    return null;
+}
+
+// Nowy prekomp zastępuje stary we wszystkich istniejących klipach (ułożenie i Time Remap warstwy zostają).
+function hrfAdopt(name, newComp) {
+    var oldComp = hrfStale[name];
+    if (!oldComp) return;
+    delete hrfStale[name];
+    var i, j, it, lay;
+    for (i = 1; i <= app.project.numItems; i++) {
+        it = app.project.item(i);
+        if (!(it instanceof CompItem) || it.id == newComp.id || it.id == oldComp.id) continue;
+        for (j = 1; j <= it.numLayers; j++) {
+            lay = it.layer(j);
+            try { if (lay.source && lay.source.id == oldComp.id) lay.replaceSource(newComp, false); } catch (er) {}
+        }
+    }
+}
+
+// Czy wczytywana trasa różni się od tej, dla której zapisano HRF_DATA?
+function hrfRouteChanged(D) {
+    var inf = hrfDataInfo();
+    if (!inf) return false;
+    if (inf.sig) return inf.sig != hrfGeomSig(hrfGeom(D.samples));
+    return String(inf.id) != String(D.activity_id || "") || String(inf.n) != String(D.samples.time_s.length);
+}
+
+function hrfHasClips() {
+    for (var i = 1; i <= app.project.numItems; i++) {
+        var it = app.project.item(i);
+        if (it instanceof CompItem && it.name.indexOf("HRF_OVERLAY") == 0) return true;
+    }
+    return false;
 }
 
 function hrfDataInfo() {
@@ -345,7 +409,7 @@ function hrfBuildClip(D, o) {
         // Czas w nich = sekundy od startu aktywności; każdy klip przesuwa go przez Time Remap.
         var keyName = hrfSafe(o.key || (vid ? vid.name : "klip"));
         var suffix = " - " + keyName, sn = 1;
-        while (hrfFindComp("HRF_NAKLAD" + suffix)) {
+        while (hrfFindComp("HRF_OVERLAY" + suffix)) {
             sn++;
             suffix = " - " + keyName + " " + sn;
         }
@@ -353,12 +417,12 @@ function hrfBuildClip(D, o) {
         var KT = (inf0 && inf0.k) ? parseFloat(inf0.k) : 1;
         if (isNaN(KT) || KT <= 0) KT = 1;
         var durAll = (S.time_s[N - 1] + 60) * KT;
-        var dataName = "HRF_DATA", mainName = "HRF_NAKLAD" + suffix;
-        var mapName = "HRF_MAPA";
-        var profName = "HRF_PROFIL", trimName = "TRIM";   // dopełniane po obliczeniu proporcji (PH)
-        var map3dName = o.OSM ? "HRF_MAPA3D" + suffix : "HRF_MAPA3D";
-        var flatName = o.OSM ? "HRF_MAPA3D_PLASKA" + suffix : "HRF_MAPA3D_PLASKA";
-        var cntName = "HRF_LICZNIKI " + W + "x" + H + "-" + (showMap ? 1 : 0) + (showProf ? 1 : 0);
+        var dataName = "HRF_DATA", mainName = "HRF_OVERLAY" + suffix;
+        var mapName = "HRF_MAP";
+        var profName = "HRF_PROFILE", trimName = "TRIM";   // dopełniane po obliczeniu proporcji (PH)
+        var map3dName = o.OSM ? "HRF_MAP3D" + suffix : "HRF_MAP3D";
+        var flatName = o.OSM ? "HRF_MAP3D_FLAT" + suffix : "HRF_MAP3D_FLAT";
+        var cntName = "HRF_COUNTERS " + W + "x" + H + "-" + (showMap ? 1 : 0) + (showProf ? 1 : 0);
         var asMs0 = hrfActivityStartMs(D.start_date_local);
         var clock0 = asMs0 === null ? 0 : Math.round((asMs0 % 86400000) / 1000);
 
@@ -453,11 +517,12 @@ function hrfBuildClip(D, o) {
             mapPts.push([0.5 + (S.lng[i] - lngMid) * cosLat * mapSc, 0.5 - (S.lat[i] - latMid) * mapSc]);
             profPts.push([S.dist_km[i] / distTotal, 1 - (S.elev_m[i] - eMin) / (eMax - eMin)]);
         }
-        profName = "HRF_PROFIL " + PW + "x" + PH;
+        profName = "HRF_PROFILE " + PW + "x" + PH;
         trimName = "TRIM " + PH;
         var PROF_Y0 = 0.10, PROF_K = 0.70; // pionowy zakres linii profilu w prekompie
 
-        var profIsNew = showProf && !hrfFindComp(profName);
+        var geoSig = hrfGeomSig(hrfGeom(S));
+        var profIsNew = showProf && !hrfFreshComp(profName, geoSig);
         if (profIsNew) {
             // postęp przycinania linii liczony po DŁUGOŚCI łamanej (a nie po dystansie),
             // dzięki temu jasna linia dochodzi dokładnie do kropki
@@ -495,9 +560,11 @@ function hrfBuildClip(D, o) {
 
         // ===== prekomp: duża mapa =====
         var mapComp = null, profComp = null, step = Math.max(1, Math.ceil(N / 900));
-        mapComp = showMap ? hrfFindComp(mapName) : null;
+        mapComp = showMap ? hrfFreshComp(mapName, geoSig) : null;
         if (showMap && !mapComp) {
             mapComp = app.project.items.addComp(mapName, MS, MS, 1, durAll, 30);
+            mapComp.comment = "sig=" + geoSig;
+            hrfAdopt(mapName, mapComp);
             var lwM = MS * 0.008;
             hrfPoly(mapComp, "Map frame", [[0, 0], [MS, 0], [MS, MS], [0, MS]], 0, 0, lwM * 0.6, 40, true);
             var rp = [];
@@ -533,6 +600,8 @@ function hrfBuildClip(D, o) {
         // ===== prekomp: duży profil =====
         if (showProf && profIsNew) {
             profComp = app.project.items.addComp(profName, PW, PH, 1, durAll, 30);
+            profComp.comment = "sig=" + geoSig;
+            hrfAdopt(profName, profComp);
             var lwP = PH * 0.012;
             hrfPoly(profComp, "Profile frame", [[0, 0], [PW, 0], [PW, PH], [0, PH]], 0, 0, lwP * 0.6, 40, true);
             // oś kilometrów
@@ -614,9 +683,10 @@ function hrfBuildClip(D, o) {
             addSl("idx", base + 'val("idx");');
             var cx = 'var C2=thisComp.layer("CAMCTL");var RX=C2.effect("rx")(1),RY=C2.effect("ry")(1),RO=C2.effect("rot")(1);';
             // każda warstwa świata (bez rodzica): Rotation = obrót mapy (+ kąt własny), Position tak, by jadący był w środku
-            var place = function (lay, ox, oy, ang) {
+            var place = function (lay, ox, oy, ang, sc) {
                 var tg = lay.property("ADBE Transform Group");
                 tg.property("ADBE Anchor Point").setValue([0, 0]);
+                if (sc) tg.property("ADBE Scale").setValue([sc * 100, sc * 100]);
                 tg.property("ADBE Rotate Z").expression = cx + 'RO+(' + (ang || 0) + ');';
                 tg.property("ADBE Position").expression = cx +
                     'var r=RO*Math.PI/180,cs=Math.cos(r),sn=Math.sin(r);var rx=RX-(' + ox + '),ry=RY-(' + oy + ');' +
@@ -686,15 +756,15 @@ function hrfBuildClip(D, o) {
                     sl.property("ADBE Transform Group").property("ADBE Opacity").setValue(op);
                     place(sl, 0, 0, 0);
                 };
-                osmLayer("OSM zielen", OSM.zielen, true, true, 0, 12);
-                osmLayer("OSM woda", OSM.woda, true, true, 0, 28);
-                osmLayer("OSM rzeki", OSM.rzeka, false, false, 5 * PXM, 35);
-                osmLayer("OSM budynki", OSM.budynek, true, true, 0, 38);
-                osmLayer("OSM sciezki", OSM.sciezka, false, false, 2.5 * PXM, 28);
-                osmLayer("OSM drogi", OSM.droga2, false, false, 6 * PXM, 32);
-                osmLayer("OSM drogi glowne", OSM.droga1, false, false, 9 * PXM, 42);
+                osmLayer("OSM green", OSM.green, true, true, 0, 12);
+                osmLayer("OSM water", OSM.water, true, true, 0, 28);
+                osmLayer("OSM rivers", OSM.river, false, false, 5 * PXM, 35);
+                osmLayer("OSM buildings", OSM.building, true, true, 0, 38);
+                osmLayer("OSM paths", OSM.path, false, false, 2.5 * PXM, 28);
+                osmLayer("OSM roads", OSM.road_minor, false, false, 6 * PXM, 32);
+                osmLayer("OSM main roads", OSM.road_major, false, false, 9 * PXM, 42);
                 // nazwy ulic (każda jako osobny napis ustawiony wzdłuż odcinka)
-                var nm = OSM.nazwy || [], ni, nl, rc, p1, p2, an, MAXN = 120, nmade = 0;
+                var nm = OSM.names || [], ni, nl, rc, p1, p2, an, MAXN = 120, nmade = 0;
                 for (ni = 0; ni < nm.length && nmade < MAXN; ni++) {
                     if (!inWin([nm[ni].lat, nm[ni].lng])) continue;
                     nmade++;
@@ -711,18 +781,20 @@ function hrfBuildClip(D, o) {
                 }
             }
 
-            // trasa i siatka we współrzędnych świata (px), dzieci węzła MAPROOT
+            // trasa, siatka i ślad są rysowane w małej skali (jak mapa 2D: ramka MS x MS), a warstwy dostają Scale = SC.
+            // Ścieżki w pikselach świata (do +/-40 tys. px) rozjeżdżały się w AE (skoki trasy w obie strony).
+            var SC = KW / MS;                  // powiększenie małego rysunku do px świata
             var rp = [], gstep = Math.max(1, Math.ceil(N / ROUTE_PTS));
             var bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9, wx, wy;
             for (i = 0; i < N; i += gstep) {
-                wx = (mapPts[i][0] - 0.5) * KW; wy = (mapPts[i][1] - 0.5) * KW;
+                wx = (mapPts[i][0] - 0.5) * MS; wy = (mapPts[i][1] - 0.5) * MS;
                 rp.push([wx, wy]);
                 if (wx < bx0) bx0 = wx; if (wx > bx1) bx1 = wx;
                 if (wy < by0) by0 = wy; if (wy > by1) by1 = wy;
             }
-            rp.push([(mapPts[N - 1][0] - 0.5) * KW, (mapPts[N - 1][1] - 0.5) * KW]);
+            rp.push([(mapPts[N - 1][0] - 0.5) * MS, (mapPts[N - 1][1] - 0.5) * MS]);
 
-            var gspx = WKM * GRID_M / 1000;  // odstęp siatki w px
+            var gspx = WKM * GRID_M / 1000 / SC;  // odstęp siatki (jednostki małego rysunku)
             var gpad = gspx * 3;
             var gx0 = Math.floor((bx0 - gpad) / gspx) * gspx, gy0 = Math.floor((by0 - gpad) / gspx) * gspx;
             var gW = bx1 - gx0 + gpad, gH = by1 - gy0 + gpad;
@@ -740,28 +812,28 @@ function hrfBuildClip(D, o) {
                     gsh.property("ADBE Vector Shape").setValue(gsp2);
                     var gst = gvv.addProperty("ADBE Vector Graphic - Stroke");
                     gst.property("ADBE Vector Stroke Color").setValue([1, 1, 1]);
-                    gst.property("ADBE Vector Stroke Width").setValue(MS * 0.003);
+                    gst.property("ADBE Vector Stroke Width").setValue(MS * 0.003 / SC);
                     var grp = gvv.addProperty("ADBE Vector Filter - Repeater");
                     grp.property("ADBE Vector Repeater Copies").setValue(Math.ceil((gv == 0 ? gW : gH) / gspx) + 1);
                     grp.property("ADBE Vector Repeater Transform").property("ADBE Vector Repeater Position").setValue(gv == 0 ? [gspx, 0] : [0, gspx]);
                     gl2.property("ADBE Transform Group").property("ADBE Opacity").setValue(18);
-                    place(gl2, gx0, gy0);
+                    place(gl2, gx0 * SC, gy0 * SC, 0, SC);
                 }
             } catch (eg) {}
-            var lw = MS * 0.03; // szerokość linii trasy (ok. 6 m)
-            var r1 = hrfPoly(flat, "Route", rp, 0, 0, lw, 55, false);
-            place(r1.layer, 0, 0);
+            var lw = MS * 0.03; // szerokość linii trasy w px świata (ok. 6 m)
+            var r1 = hrfPoly(flat, "Route", rp, 0, 0, lw / SC, 55, false);
+            place(r1.layer, 0, 0, 0, SC);
             // "Route done": ślad za jadącym budowany wyrażeniem (bez Trim Paths) – kończy się dokładnie w punkcie strzałki
-            var r2 = hrfPoly(flat, "Route done", [[0, 0], [1, 1]], 0, 0, lw * 1.4, 100, false);
+            var r2 = hrfPoly(flat, "Route done", [[0, 0], [1, 1]], 0, 0, lw * 1.4 / SC, 100, false);
             var pj = [], pi2;
-            for (pi2 = 0; pi2 < rp.length; pi2++) pj.push("[" + Math.round(rp[pi2][0] * 10) / 10 + "," + Math.round(rp[pi2][1] * 10) / 10 + "]");
+            for (pi2 = 0; pi2 < rp.length; pi2++) pj.push("[" + Math.round(rp[pi2][0] * 1000) / 1000 + "," + Math.round(rp[pi2][1] * 1000) / 1000 + "]");
             var WINPTS = Math.ceil(400 / gstep);   // ile ostatnich próbek (ok. 400 s jazdy) rysować za jadącym
             r2.vecs.property("ADBE Vector Shape - Group").property("ADBE Vector Shape").expression =
                 'var C2=thisComp.layer("CAMCTL");var P=[' + pj.join(",") + '];' +
                 'var k=Math.max(1,Math.min(P.length-1,Math.floor(C2.effect("idx")(1)/' + gstep + ')));' +
-                'var Q=P.slice(Math.max(0,k-' + WINPTS + '),k+1);Q.push([C2.effect("rx")(1),C2.effect("ry")(1)]);' +
+                'var Q=P.slice(Math.max(0,k-' + WINPTS + '),k+1);Q.push([C2.effect("rx")(1)/' + SC + ',C2.effect("ry")(1)/' + SC + ']);' +
                 'createPath(Q,[],[],false);';
-            place(r2.layer, 0, 0);
+            place(r2.layer, 0, 0, 0, SC);
             // strzałka jadącego pośrodku (leży na mapie, nie obraca się razem z nią)
             var ar = MS * 0.04;
             var arw = hrfFilled(flat, "Rider arrow", [[0, -1.3 * ar], [0.9 * ar, ar], [0, 0.45 * ar], [-0.9 * ar, ar]], 0);
@@ -799,8 +871,14 @@ function hrfBuildClip(D, o) {
             return c3;
         };
         if (show3d && mapComp) {
-            map3d = hrfFindComp(map3dName);
-            if (!map3d) map3d = build3D();
+            map3d = hrfFreshComp(map3dName, geoSig);
+            if (!map3d) {
+                var oldFlat = hrfFindComp(flatName);
+                if (oldFlat) oldFlat.name = flatName + " (old)";
+                map3d = build3D();
+                map3d.comment = "sig=" + geoSig;
+                hrfAdopt(map3dName, map3d);
+            }
         }
         // przesunięcie czasu klipu: czas w prekompach = sekundy od startu aktywności
         var remap = function (lay) {
@@ -814,7 +892,7 @@ function hrfBuildClip(D, o) {
         // prekompy w kadrze głównym (pomniejszone; w razie potrzeby powiększ Scale/Position)
         if (mapComp) {
             var ml = comp.layers.add(mapComp);
-            ml.name = "MAPA";
+            ml.name = "MAP";
             ml.property("ADBE Transform Group").property("ADBE Position").setValue([mx + hTop / 2, topY + hTop / 2]);
             ml.property("ADBE Transform Group").property("ADBE Scale").setValue([hTop / MS * 100, hTop / MS * 100]);
             if (map3d) ml.enabled = false; // mapa 2D ukryta, gdy jest mini mapa 3D (włącz okiem)
@@ -841,10 +919,10 @@ function hrfBuildClip(D, o) {
             } catch (em) {}
             return l3;
         };
-        if (map3d) add3dLayer(map3d, "MAPA 3D (zza plecow)");
+        if (map3d) add3dLayer(map3d, "MAP 3D (from behind)");
         if (profComp) {
             var pl2 = comp.layers.add(profComp);
-            pl2.name = "PROFIL";
+            pl2.name = "PROFILE";
             pl2.property("ADBE Transform Group").property("ADBE Position").setValue([profX + profW / 2, topY + hTop / 2]);
             pl2.property("ADBE Transform Group").property("ADBE Scale").setValue([profW / PW * 100, profW / PW * 100]);
             remap(pl2);
@@ -869,7 +947,7 @@ function hrfBuildClip(D, o) {
             }
         }
         var cl = comp.layers.add(cnt);
-        cl.name = "LICZNIKI";
+        cl.name = "COUNTERS";
         remap(cl);
 
         ctrl.moveToEnd();
@@ -884,10 +962,15 @@ function hrfBuildClip(D, o) {
 // ---------- panel ----------
 function hrfPanel() {
     var D = null, filePath = "", lastPickId = -1;
-    var w = new Window("palette", "HRF - dane Strava", undefined, { resizeable: false });
+    var w = new Window("palette", "HRF - dane Strava " + HRF_VERSION, undefined, { resizeable: false });
     w.orientation = "column";
     w.alignChildren = "fill";
     w.margins = 12;
+    var stVer = w.add("statictext", undefined, "Wersja " + HRF_VERSION + "  |  build " + hrfBuildStamp());
+    try {
+        stVer.helpTip = String($.fileName);
+        stVer.graphics.font = ScriptUI.newFont("Arial", "BOLD", 11);
+    } catch (ev) {}
     var stData = w.add("statictext", undefined, "Dane: nie wczytano", { multiline: true });
     stData.preferredSize.width = 330;
     stData.preferredSize.height = 42;
@@ -944,8 +1027,8 @@ function hrfPanel() {
         try {
             var nd = hrfReadJson(f);
             var inf = hrfDataInfo();
-            if (refresh && inf && inf.id && String(nd.activity_id || "") != inf.id) {
-                if (!confirm("To inna aktywnosc niz w projekcie (" + inf.id + "). Klipy zrobione wczesniej beda mialy stara trase.\nKontynuowac?")) return;
+            if (hrfRouteChanged(nd) && hrfHasClips()) {
+                if (!confirm("To inna trasa niz w projekcie" + (inf && inf.id ? " (aktywnosc " + inf.id + ")" : "") + ". Mapa i profil w istniejacych klipach sa ze starej trasy.\nZostana podmienione na nowe przy nastepnym dodaniu klipu.\nKontynuowac?")) return;
             }
             D = nd;
             filePath = f.fsName;
@@ -982,7 +1065,7 @@ function hrfPanel() {
         return vid;
     };
     bLoad.onClick = function () {
-        var f = File.openDialog("Wskaz plik JSON z danymi (hrf_ae_dane_v2.json)", "JSON:*.json,Wszystkie:*.*");
+        var f = File.openDialog("Wskaz plik JSON z danymi (<nazwa>_hrf.json)", "JSON:*.json,Wszystkie:*.*");
         if (f) load(f, false);
     };
     bRef.onClick = function () {
@@ -1014,7 +1097,7 @@ function hrfPanel() {
         }
         var OSM = null;
         if (cM.value && c3.value && cO.value) {
-            var fo = File.openDialog("Wskaz plik hrf_osm.json (z hrf_osm_pobierz.py)", "JSON:*.json,Wszystkie:*.*");
+            var fo = File.openDialog("Wskaz plik hrf_osm.json (z hrf_osm_fetch.py)", "JSON:*.json,Wszystkie:*.*");
             if (fo) {
                 try {
                     fo.encoding = "UTF-8"; fo.open("r"); var ot = fo.read(); fo.close();
