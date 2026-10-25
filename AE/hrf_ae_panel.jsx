@@ -1,5 +1,5 @@
 ﻿/*
-  HRF — panel danych Strava dla After Effects (v14.1, wersja testowa)
+  HRF — panel danych Strava dla After Effects (v14.4, wersja testowa)
   -----------------------------------------------------------------
   Uruchomienie: Plik > Skrypt > Uruchom plik skryptu... > hrf_ae_panel.jsx
   (otwiera się małe okno-panel, które zostaje na wierzchu; wymaga zezwolenia
@@ -26,7 +26,14 @@ var HRF_REQUIRED = ["speed_kmh", "hr", "elev_m", "dist_km", "grade_pct", "gain_m
     "lat", "lng", "progress_pct", "remain_km", "heading_unw"];
 var HRF_MS = 1080;   // bok prekompu z mapą
 var hrfStale = {};   // nazwa -> nieaktualny prekomp (zmieniony na "(old)"), czeka na podmianę w klipach
-var HRF_VERSION = "v14.1";   // podnoś przy zmianach widocznych dla użytkownika; czas buildu panel bierze z daty modyfikacji pliku
+var HRF_VERSION = "v14.4";   // podnoś przy zmianach widocznych dla użytkownika; czas buildu panel bierze z daty modyfikacji pliku
+
+// średnia wartości tablicy w oknie +/- w próbek wokół indeksu i (wygładzanie wysokości)
+function hrfAvgAround(arr, i, w) {
+    var a = Math.max(0, i - w), b = Math.min(arr.length - 1, i + w), sum = 0, j;
+    for (j = a; j <= b; j++) sum += arr[j];
+    return sum / (b - a + 1);
+}
 
 function hrfPad2(n) { return (n < 10 ? "0" : "") + n; }
 
@@ -335,7 +342,7 @@ function hrfWriteData(D, filePath, progress) {
 // więc zapisujemy w ich komentarzu, dla jakiej trasy powstały.
 function hrfGeomSig(G) {
     // ostatni człon = wersja rysowania prekompów; po zmianie kodu mapy/profilu podnieś go, a stare prekomp zbudują się od nowa
-    return [G.latMid.toFixed(5), G.lngMid.toFixed(5), G.mapSc.toFixed(3), Math.round(G.eMin), Math.round(G.eMax), G.distTotal.toFixed(2), "r2"].join("/");
+    return [G.latMid.toFixed(5), G.lngMid.toFixed(5), G.mapSc.toFixed(3), Math.round(G.eMin), Math.round(G.eMax), G.distTotal.toFixed(2), "r5"].join("/");
 }
 
 // Zwraca wspólny prekomp tylko wtedy, gdy powstał dla tej samej trasy. Nieaktualny dostaje " (old)",
@@ -640,6 +647,7 @@ function hrfBuildClip(D, o) {
         var GRID_M = 50;                   // odstęp siatki w metrach
         var RING_R = MS * 0.46;            // promień okrągłego wycinka na ekranie (px)
         var TILT_DEG = 50;                 // pochylenie kamery od normalnej mapy (0 = z góry, 60 = prawie z boku)
+        var ELEV_EXAG = 0;                 // domyślne przewyższenie trasy na mapie 3D (0 = płasko, 1 = skala rzeczywista); potem do zmiany suwakiem na CAMCTL
         var CAM_D = 1500;                  // odległość kamery od jadącego (mniejsza = silniejsza perspektywa)
         var ROUTE_PTS = 6000;              // liczba punktów trasy w mapie (wycinek 100 m wymaga gęstej trasy)
         var WKM = RING_R / (VIEW_M / 1000);          // px świata na kilometr
@@ -676,12 +684,23 @@ function hrfBuildClip(D, o) {
                 ef.property(1).expression = expr;
             };
             var dm = 'comp("' + dataName + '").layer("MAPDOT").transform.position';
-            addSl("rx", base + 'var a=0;for(var i=-1;i<=1;i++){a+=' + dm + '.valueAtTime(tt+i*K)[0];}(a/3-0.5)*' + KW + ';');
-            addSl("ry", base + 'var a=0;for(var i=-1;i<=1;i++){a+=' + dm + '.valueAtTime(tt+i*K)[1];}(a/3-0.5)*' + KW + ';');
-            addSl("rot", base + 'var a=0;for(var i=-3;i<=3;i++){a+=d.effect("heading_unw")(1).valueAtTime(tt+i*K);}-a/7;');
-            addSl("trim", base + 'var a=0;for(var i=-1;i<=1;i++){a+=d.effect("map_trim")(1).valueAtTime(tt+i*K);}Math.max(0,Math.min(100,a/3));');
-            addSl("idx", base + 'val("idx");');
-            var cx = 'var C2=thisComp.layer("CAMCTL");var RX=C2.effect("rx")(1),RY=C2.effect("ry")(1),RO=C2.effect("rot")(1);';
+            addSl("Rider X (map px)", base + 'var a=0;for(var i=-1;i<=1;i++){a+=' + dm + '.valueAtTime(tt+i*K)[0];}(a/3-0.5)*' + KW + ';');
+            addSl("Rider Y (map px)", base + 'var a=0;for(var i=-1;i<=1;i++){a+=' + dm + '.valueAtTime(tt+i*K)[1];}(a/3-0.5)*' + KW + ';');
+            addSl("Map rotation (deg)", base + 'var a=0;for(var i=-3;i<=3;i++){a+=d.effect("heading_unw")(1).valueAtTime(tt+i*K);}-a/7;');
+            addSl("Route progress (%)", base + 'var a=0;for(var i=-1;i<=1;i++){a+=d.effect("map_trim")(1).valueAtTime(tt+i*K);}Math.max(0,Math.min(100,a/3));');
+            addSl("Sample index (data row)", base + 'val("idx");');
+            var exSl = ctl.property("ADBE Effect Parade").addProperty("ADBE Slider Control");
+            exSl.name = "Elevation exaggeration (0 = off)";
+            exSl.property(1).setValue(ELEV_EXAG);
+            try {
+                ctl.comment = "STEROWANIE MAPA 3D (wartosci poza pierwszym suwakiem sa liczone z danych - nie zmieniaj)\n" +
+                    "Elevation exaggeration (0 = off): JEDYNY suwak do recznej zmiany. 0 = trasa plaska, 1 = wysokosc w skali rzeczywistej, 3 = wyraznie.\n" +
+                    "Rider X / Rider Y (map px): pozycja jadacego na mapie w pikselach swiata (z HRF_DATA).\n" +
+                    "Map rotation (deg): obrot mapy tak, by kierunek jazdy byl w gore (z kierunku jazdy).\n" +
+                    "Route progress (%): odcinek trasy za jadacym liczony po dlugosci (z danych).\n" +
+                    "Sample index (data row): numer probki z pliku danych w tej chwili.";
+            } catch (ec) {}
+            var cx = 'var C2=thisComp.layer("CAMCTL");var RX=C2.effect("Rider X (map px)")(1),RY=C2.effect("Rider Y (map px)")(1),RO=C2.effect("Map rotation (deg)")(1);';
             // każda warstwa świata (bez rodzica): Rotation = obrót mapy (+ kąt własny), Position tak, by jadący był w środku
             var place = function (lay, ox, oy, ang, sc) {
                 var tg = lay.property("ADBE Transform Group");
@@ -784,15 +803,17 @@ function hrfBuildClip(D, o) {
             // trasa, siatka i ślad są rysowane w małej skali (jak mapa 2D: ramka MS x MS), a warstwy dostają Scale = SC.
             // Ścieżki w pikselach świata (do +/-40 tys. px) rozjeżdżały się w AE (skoki trasy w obie strony).
             var SC = KW / MS;                  // powiększenie małego rysunku do px świata
-            var rp = [], gstep = Math.max(1, Math.ceil(N / ROUTE_PTS));
+            var rp = [], rz = [], gstep = Math.max(1, Math.ceil(N / ROUTE_PTS));
             var bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9, wx, wy;
             for (i = 0; i < N; i += gstep) {
                 wx = (mapPts[i][0] - 0.5) * MS; wy = (mapPts[i][1] - 0.5) * MS;
                 rp.push([wx, wy]);
+                rz.push(hrfAvgAround(S.elev_m, i, 5));
                 if (wx < bx0) bx0 = wx; if (wx > bx1) bx1 = wx;
                 if (wy < by0) by0 = wy; if (wy > by1) by1 = wy;
             }
             rp.push([(mapPts[N - 1][0] - 0.5) * MS, (mapPts[N - 1][1] - 0.5) * MS]);
+            rz.push(hrfAvgAround(S.elev_m, N - 1, 5));
 
             var gspx = WKM * GRID_M / 1000 / SC;  // odstęp siatki (jednostki małego rysunku)
             var gpad = gspx * 3;
@@ -821,19 +842,37 @@ function hrfBuildClip(D, o) {
                 }
             } catch (eg) {}
             var lw = MS * 0.03; // szerokość linii trasy w px świata (ok. 6 m)
-            var r1 = hrfPoly(flat, "Route", rp, 0, 0, lw / SC, 55, false);
-            place(r1.layer, 0, 0, 0, SC);
-            // "Route done": ślad za jadącym budowany wyrażeniem (bez Trim Paths) – kończy się dokładnie w punkcie strzałki
+            // Trasa i ślad liczone wyrażeniem: punkty są od razu obrócone (kierunek jazdy w górę) i uniesione o wysokość
+            // względem jadącego, więc warstwy stoją w środku bez obrotu. Wysokość z = przesunięcie w górę ekranu
+            // o z * tan(pochylenie kamery) (tak wygląda wysokość pod pochyloną kamerą) razy ELEV_EXAG.
+            var r1 = hrfPoly(flat, "Route", [[0, 0], [1, 1]], 0, 0, lw / SC, 55, false);
             var r2 = hrfPoly(flat, "Route done", [[0, 0], [1, 1]], 0, 0, lw * 1.4 / SC, 100, false);
             var pj = [], pi2;
-            for (pi2 = 0; pi2 < rp.length; pi2++) pj.push("[" + Math.round(rp[pi2][0] * 1000) / 1000 + "," + Math.round(rp[pi2][1] * 1000) / 1000 + "]");
+            for (pi2 = 0; pi2 < rp.length; pi2++) {
+                pj.push("[" + Math.round(rp[pi2][0] * 1000) / 1000 + "," + Math.round(rp[pi2][1] * 1000) / 1000 + "," + Math.round(rz[pi2] * 10) / 10 + "]");
+            }
             var WINPTS = Math.ceil(400 / gstep);   // ile ostatnich próbek (ok. 400 s jazdy) rysować za jadącym
-            r2.vecs.property("ADBE Vector Shape - Group").property("ADBE Vector Shape").expression =
+            var LIFT = (WKM / 1000) * Math.tan(TILT_USED * Math.PI / 180) / SC;   // jednostki małego rysunku na metr wysokości (bez przewyższenia)
+            var geoExpr =
                 'var C2=thisComp.layer("CAMCTL");var P=[' + pj.join(",") + '];' +
-                'var k=Math.max(1,Math.min(P.length-1,Math.floor(C2.effect("idx")(1)/' + gstep + ')));' +
-                'var Q=P.slice(Math.max(0,k-' + WINPTS + '),k+1);Q.push([C2.effect("rx")(1)/' + SC + ',C2.effect("ry")(1)/' + SC + ']);' +
-                'createPath(Q,[],[],false);';
-            place(r2.layer, 0, 0, 0, SC);
+                'var kf=Math.max(1,Math.min(P.length-1,C2.effect("Sample index (data row)")(1)/' + gstep + '));var k=Math.floor(kf),fr=kf-k;' +
+                'var k1=Math.min(P.length-1,k+1);var RZ=P[k][2]*(1-fr)+P[k1][2]*fr;' +
+                'var RX=C2.effect("Rider X (map px)")(1)/' + SC + ',RY=C2.effect("Rider Y (map px)")(1)/' + SC + ',RO=C2.effect("Map rotation (deg)")(1)*Math.PI/180;' +
+                'var cs=Math.cos(RO),sn=Math.sin(RO),EX=' + LIFT + '*C2.effect("Elevation exaggeration (0 = off)")(1);' +
+                'function q(p){var x=p[0]-RX,y=p[1]-RY;return [x*cs-y*sn,x*sn+y*cs-(p[2]-RZ)*EX];}' +
+                'var Q=[],i;';
+            r1.vecs.property("ADBE Vector Shape - Group").property("ADBE Vector Shape").expression =
+                geoExpr + 'for(i=0;i<P.length;i++)Q.push(q(P[i]));createPath(Q,[],[],false);';
+            r2.vecs.property("ADBE Vector Shape - Group").property("ADBE Vector Shape").expression =
+                geoExpr + 'for(i=Math.max(0,k-' + WINPTS + ');i<=k;i++)Q.push(q(P[i]));Q.push([0,0]);createPath(Q,[],[],false);';
+            var centerLayer = function (lay) {
+                var tg = lay.property("ADBE Transform Group");
+                tg.property("ADBE Anchor Point").setValue([0, 0]);
+                tg.property("ADBE Position").setValue([FL / 2, FL / 2]);
+                tg.property("ADBE Scale").setValue([SC * 100, SC * 100]);
+            };
+            centerLayer(r1.layer);
+            centerLayer(r2.layer);
             // strzałka jadącego pośrodku (leży na mapie, nie obraca się razem z nią)
             var ar = MS * 0.04;
             var arw = hrfFilled(flat, "Rider arrow", [[0, -1.3 * ar], [0.9 * ar, ar], [0, 0.45 * ar], [-0.9 * ar, ar]], 0);
