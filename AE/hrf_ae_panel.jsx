@@ -1,5 +1,5 @@
 ﻿/*
-  HRF — panel danych Strava dla After Effects (v14.4, wersja testowa)
+  HRF — panel danych Strava dla After Effects (v14.5, wersja testowa)
   -----------------------------------------------------------------
   Uruchomienie: Plik > Skrypt > Uruchom plik skryptu... > hrf_ae_panel.jsx
   (otwiera się małe okno-panel, które zostaje na wierzchu; wymaga zezwolenia
@@ -26,7 +26,35 @@ var HRF_REQUIRED = ["speed_kmh", "hr", "elev_m", "dist_km", "grade_pct", "gain_m
     "lat", "lng", "progress_pct", "remain_km", "heading_unw"];
 var HRF_MS = 1080;   // bok prekompu z mapą
 var hrfStale = {};   // nazwa -> nieaktualny prekomp (zmieniony na "(old)"), czeka na podmianę w klipach
-var HRF_VERSION = "v14.4";   // podnoś przy zmianach widocznych dla użytkownika; czas buildu panel bierze z daty modyfikacji pliku
+
+// Pola licznika: [klucz, etykieta, wyrażenie]. "speed" to duży napis prędkości (bez wyrażenia tutaj).
+// Kolejność = kolejność w siatce licznika.
+var HRF_FIELDS = [
+    ["speed", "PREDKOSC  km/h (duzy napis)", null],
+    ["hr", "TETNO  bpm", 'Math.round(val("hr")).toString();'],
+    ["hr_avg", "TETNO SR.  bpm", 'Math.round(val("avg_hr")).toString();'],
+    ["hr_max", "TETNO MAKS.  bpm", 'Math.round(val("max_hr")).toString();'],
+    ["hr_zone", "STREFA TETNA", '"Z"+Math.round(val("hr_zone"));'],
+    ["elev", "WYSOKOSC  m", 'Math.round(val("elev_m")).toString();'],
+    ["grade", "NACHYLENIE  %", 'f1(val("grade_pct"));'],
+    ["vam", "VAM  m/h", 'Math.round(val("vam_mh")).toString();'],
+    ["gain", "PODJAZDY  m", 'Math.round(val("gain_m")).toString();'],
+    ["loss", "ZJAZDY  m", 'Math.round(val("loss_m")).toString();'],
+    ["dist", "DYSTANS  km", 'f1(val("dist_km"));'],
+    ["remain", "POZOSTALO  km", 'f1(val("remain_km"));'],
+    ["progress", "POSTEP  %", 'Math.round(val("progress_pct")).toString();'],
+    ["speed_avg", "SR. PREDKOSC  km/h", 'f1(val("avg_speed_kmh"));'],
+    ["speed_max", "MAKS. PREDKOSC  km/h", 'f1(val("max_speed_kmh"));'],
+    ["moving", "CZAS RUCHU", 'hms(val("moving_s"));'],
+    ["elapsed", "CZAS AKTYWNOSCI", 'hms(time/K);'],
+    ["clock", "GODZINA", 'hms(((Math.round(c0+time/K)%86400)+86400)%86400);'],
+    ["heading", "KIERUNEK", 'var h=((Math.round(val("heading_unw"))%360)+360)%360;' +
+        'var nm=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];' +
+        'h+String.fromCharCode(176)+" "+nm[Math.round(h/22.5)%16];'],
+    ["lat", "SZEROKOSC GPS", 'val("lat").toFixed(5);'],
+    ["lng", "DLUGOSC GPS", 'val("lng").toFixed(5);']
+];
+var HRF_VERSION = "v14.5";   // podnoś przy zmianach widocznych dla użytkownika; czas buildu panel bierze z daty modyfikacji pliku
 
 // średnia wartości tablicy w oknie +/- w próbek wokół indeksu i (wygładzanie wysokości)
 function hrfAvgAround(arr, i, w) {
@@ -400,7 +428,7 @@ function hrfDataInfo() {
 }
 
 // ---------- budowa jednego klipu ----------
-// o: {W,H,fps,dur,off,vid,addVid,showMap,showProf,show3d,OSM,key}
+// o: {W,H,fps,dur,off,vid,addVid,showMap,showProf,show3d,OSM,key,fields}
 function hrfBuildClip(D, o) {
     var S = D.samples;
     var W = o.W, H = o.H, fps = o.fps, dur = o.dur, off = o.off, vid = o.vid;
@@ -448,30 +476,15 @@ function hrfBuildClip(D, o) {
         if (!dcomp) throw new Error("Brak kompozycji HRF_DATA – najpierw wczytaj dane.");
 
         // ===== układ liczony z rozmiaru wideo =====
-        var items = [
-            ["TETNO  bpm", 'Math.round(val("hr")).toString();'],
-            ["TETNO SR.  bpm", 'Math.round(val("avg_hr")).toString();'],
-            ["TETNO MAKS.  bpm", 'Math.round(val("max_hr")).toString();'],
-            ["STREFA TETNA", '"Z"+Math.round(val("hr_zone"));'],
-            ["WYSOKOSC  m", 'Math.round(val("elev_m")).toString();'],
-            ["NACHYLENIE  %", 'f1(val("grade_pct"));'],
-            ["VAM  m/h", 'Math.round(val("vam_mh")).toString();'],
-            ["PODJAZDY  m", 'Math.round(val("gain_m")).toString();'],
-            ["ZJAZDY  m", 'Math.round(val("loss_m")).toString();'],
-            ["DYSTANS  km", 'f1(val("dist_km"));'],
-            ["POZOSTALO  km", 'f1(val("remain_km"));'],
-            ["POSTEP  %", 'Math.round(val("progress_pct")).toString();'],
-            ["SR. PREDKOSC  km/h", 'f1(val("avg_speed_kmh"));'],
-            ["MAKS. PREDKOSC  km/h", 'f1(val("max_speed_kmh"));'],
-            ["CZAS RUCHU", 'hms(val("moving_s"));'],
-            ["CZAS AKTYWNOSCI", 'hms(time/K);'],
-            ["GODZINA", 'hms(((Math.round(c0+time/K)%86400)+86400)%86400);'],
-            ["KIERUNEK", 'var h=((Math.round(val("heading_unw"))%360)+360)%360;' +
-                'var nm=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];' +
-                'h+String.fromCharCode(176)+" "+nm[Math.round(h/22.5)%16];'],
-            ["SZEROKOSC GPS", 'val("lat").toFixed(5);'],
-            ["DLUGOSC GPS", 'val("lng").toFixed(5);']
-        ];
+        var fsel = o.fields;   // mapa klucz -> true (null = wszystkie pola)
+        var showSpeed = !fsel || !!fsel.speed;
+        var items = [], fi, fmask = 0;
+        for (fi = 0; fi < HRF_FIELDS.length; fi++) {
+            if (fsel && !fsel[HRF_FIELDS[fi][0]]) continue;
+            fmask += Math.pow(2, fi);
+            if (HRF_FIELDS[fi][2]) items.push([HRF_FIELDS[fi][1], HRF_FIELDS[fi][2]]);
+        }
+        cntName += fsel ? "-" + fmask.toString(16) : "-all";
         var landscape = W >= H;
         var mx = W * 0.04, innerW = W - 2 * mx;
         var cols = landscape ? 6 : 3;
@@ -486,10 +499,11 @@ function hrfBuildClip(D, o) {
         var hasTop = showMap || showProf;
         var hTop = hasTop ? (landscape ? 0.22 : 0.15) * H : 0;
         var avail = H - 2 * topY - (hasTop ? hTop + g : 0);
-        var need = headerH + g + rows * cellH;
+        var need = (showSpeed ? headerH + g : 0) + rows * cellH;
         var k = Math.min(1, avail / need);
         vsz *= k; lsz *= k; bigS *= k; cellH *= k; headerH *= k;
-        var blockH = headerH + g + rows * cellH;
+        var headTotal = showSpeed ? headerH + g : 0;
+        var blockH = headTotal + rows * cellH;
         var yBlock = H - topY - blockH;
         var profX = showMap ? mx + hTop + g : mx;
         var profW = innerW - (showMap ? hTop + g : 0);
@@ -971,16 +985,18 @@ function hrfBuildClip(D, o) {
         var cnt = hrfFindComp(cntName);
         if (!cnt) {
             cnt = app.project.items.addComp(cntName, W, H, 1, durAll, 30);
-            hrfText(cnt, "Speed label", mx, yBlock + lsz, lsz, null, "PREDKOSC  km/h");
-            hrfText(cnt, "Speed value", mx, yBlock + lsz * 1.5 + bigS * 0.8, bigS,
-                base +
-                'var v=val("speed_kmh");' +
-                'if(v<0.5){var dd=d.effect("dist_km")(1);var kk=(dd.valueAtTime(tt+2*K)-dd.valueAtTime(tt-2*K))/4*3600;if(kk>v)v=kk;}' +
-                'Math.round(v).toString();', "0");
+            if (showSpeed) {
+                hrfText(cnt, "Speed label", mx, yBlock + lsz, lsz, null, "PREDKOSC  km/h");
+                hrfText(cnt, "Speed value", mx, yBlock + lsz * 1.5 + bigS * 0.8, bigS,
+                    base +
+                    'var v=val("speed_kmh");' +
+                    'if(v<0.5){var dd=d.effect("dist_km")(1);var kk=(dd.valueAtTime(tt+2*K)-dd.valueAtTime(tt-2*K))/4*3600;if(kk>v)v=kk;}' +
+                    'Math.round(v).toString();', "0");
+            }
             for (var r = 0; r < items.length; r++) {
                 var col = r % cols, row = Math.floor(r / cols);
                 var cx = mx + col * cw;
-                var cy = yBlock + headerH + g + row * cellH;
+                var cy = yBlock + headTotal + row * cellH;
                 hrfText(cnt, "Label " + (r + 1), cx, cy + lsz, lsz, null, items[r][0]);
                 hrfText(cnt, "Value " + (r + 1), cx, cy + lsz * 1.5 + vsz, vsz, base + items[r][1], "0");
             }
@@ -1039,9 +1055,70 @@ function hrfPanel() {
     var cP = pn.add("checkbox", undefined, "Profil wysokosci"); cP.value = true;
     var c3 = pn.add("checkbox", undefined, "Mini mapa 3D zza plecow"); c3.value = true;
     var cO = pn.add("checkbox", undefined, "Otoczenie z OSM (plik hrf_osm.json)"); cO.value = false;
+    var gF = pn.add("group");
+    var bFields = gF.add("button", undefined, "Pola licznika...");
+    var stFields = gF.add("statictext", undefined, "");
+    stFields.preferredSize.width = 150;
     var bAdd = pn.add("button", undefined, "Dodaj klip z zaznaczonego wideo");
     var stStat = w.add("statictext", undefined, "");
     var bClose = w.add("button", undefined, "Zamknij");
+
+    // wybór pól licznika (zapamiętywany między uruchomieniami)
+    var sel = {}, fk;
+    for (fk = 0; fk < HRF_FIELDS.length; fk++) sel[HRF_FIELDS[fk][0]] = true;
+    try {
+        if (app.settings.haveSetting("HRF", "fields")) {
+            var saved = String(app.settings.getSetting("HRF", "fields")).split(","), sj;
+            for (fk = 0; fk < HRF_FIELDS.length; fk++) sel[HRF_FIELDS[fk][0]] = false;
+            for (sj = 0; sj < saved.length; sj++) if (saved[sj] in sel) sel[saved[sj]] = true;
+        }
+    } catch (es) {}
+    var countSel = function () {
+        var c = 0, q;
+        for (q = 0; q < HRF_FIELDS.length; q++) if (sel[HRF_FIELDS[q][0]]) c++;
+        return c;
+    };
+    var showFields = function () { stFields.text = "Pola: " + countSel() + " z " + HRF_FIELDS.length; };
+    var fieldsOpt = function () { return countSel() == HRF_FIELDS.length ? null : sel; };   // null = wszystkie
+    var pickFields = function () {
+        var dlg = new Window("dialog", "Pola licznika");
+        dlg.orientation = "column";
+        dlg.alignChildren = "fill";
+        dlg.margins = 12;
+        var gc = dlg.add("group");
+        gc.orientation = "row";
+        gc.alignChildren = "top";
+        var colG = [], cn, cbs = [], q;
+        for (cn = 0; cn < 3; cn++) {
+            colG.push(gc.add("group"));
+            colG[cn].orientation = "column";
+            colG[cn].alignChildren = "left";
+        }
+        var perCol = Math.ceil(HRF_FIELDS.length / 3);
+        for (q = 0; q < HRF_FIELDS.length; q++) {
+            var cb = colG[Math.floor(q / perCol)].add("checkbox", undefined, HRF_FIELDS[q][1]);
+            cb.value = !!sel[HRF_FIELDS[q][0]];
+            cbs.push(cb);
+        }
+        var gq = dlg.add("group");
+        var bAll = gq.add("button", undefined, "Wszystkie");
+        var bNone = gq.add("button", undefined, "Zadne");
+        gq.add("button", undefined, "OK", { name: "ok" });
+        gq.add("button", undefined, "Anuluj", { name: "cancel" });
+        bAll.onClick = function () { for (var z = 0; z < cbs.length; z++) cbs[z].value = true; };
+        bNone.onClick = function () { for (var z = 0; z < cbs.length; z++) cbs[z].value = false; };
+        if (dlg.show() == 1) {
+            var keep = [];
+            for (q = 0; q < HRF_FIELDS.length; q++) {
+                sel[HRF_FIELDS[q][0]] = cbs[q].value;
+                if (cbs[q].value) keep.push(HRF_FIELDS[q][0]);
+            }
+            try { app.settings.saveSetting("HRF", "fields", keep.join(",")); } catch (e2) {}
+            showFields();
+        }
+    };
+    bFields.onClick = pickFields;
+    showFields();
 
     var selectedVideo = function () {
         for (var si = 0; si < app.project.selection.length; si++) {
@@ -1146,7 +1223,7 @@ function hrfPanel() {
         }
         setStatus("Buduje klip...");
         hrfBuildClip(D, { W: parseInt(sm[1], 10), H: parseInt(sm[2], 10), fps: fps, dur: dur, off: off, vid: vid,
-            addVid: cV.value, showMap: cM.value, showProf: cP.value, show3d: c3.value, OSM: OSM, key: vid ? vid.name : "klip" });
+            addVid: cV.value, showMap: cM.value, showProf: cP.value, show3d: c3.value, OSM: OSM, key: vid ? vid.name : "klip", fields: fieldsOpt() });
         setStatus("Klip dodany.");
     };
     bClose.onClick = function () { w.close(); };

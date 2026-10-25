@@ -48,6 +48,5 @@ oraz pola: name, activity_id, start_date_local, start_code, end_code, total_dist
 
 ## Do zrobienia
 - Kolory i fonty po zakończeniu testów (teraz białe, Arial).
-- Test na prawdziwym pliku FIT.
 - Wariant układu pod poziome wideo; opcjonalnie wybór pól do pokazania w panelu.
 - Rysowanie otoczenia OSM – sprawdzić pobieranie Overpass (błędy 502).
