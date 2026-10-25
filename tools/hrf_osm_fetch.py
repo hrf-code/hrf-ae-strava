@@ -24,7 +24,7 @@ Opcje:
   --radius M     pas wokół trasy w metrach (domyślnie 150)
   --chunk M      długość odcinka trasy na jedno zapytanie, m (domyślnie 3000)
   --tries N      liczba prób na odcinek (domyślnie 6, serwery używane naprzemiennie)
-  --timeout S    limit czasu jednego zapytania w sekundach (domyślnie 180)
+  --timeout S    limit czasu jednego zapytania w sekundach (domyślnie 90)
   --server URL   własny serwer Overpass (zamiast domyślnych)
   --force        ignoruj pamięć podręczną i pobierz wszystko od nowa
   --yes          nie pytaj o zgodę przed pobieraniem
@@ -42,10 +42,12 @@ except Exception:
     pass
 
 SERVERS = [
-    "https://overpass-api.de/api/interpreter",
+    "https://overpass.openstreetmap.fr/api/interpreter",   # działał najszybciej w testach
+    "https://overpass-api.de/api/interpreter",             # główny, często przeciążony (502)
     "https://overpass.kumi.systems/api/interpreter",
 ]
 EARTH_R = 6371000.0
+QUERY_EPS_M = 15.0   # tolerancja uproszczenia linii w zapytaniu, m
 W = 64
 TTY = sys.stdout.isatty()
 SPIN = "|/-\\"
@@ -130,6 +132,27 @@ def host(url):
     return urllib.parse.urlparse(url).netloc or url
 
 
+STATE = {"total": 0, "cached": 0}   # ile odcinków łącznie i ile już w pamięci podręcznej (do komunikatów po przerwaniu)
+
+
+def rerun_command():
+    """Dokładnie ta sama komenda, którą uruchomiono – do skopiowania przy wznawianiu."""
+    parts = ["py"] + sys.argv
+    return " ".join('"%s"' % x if (" " in x) else x for x in parts)
+
+
+def print_resume_hint(after_fix=False):
+    ui_info("Odcinki w pamięci podręcznej: %d z %d (nie trzeba ich pobierać ponownie)." % (STATE["cached"], STATE["total"]))
+    if after_fix:
+        ui_info("Pobrane dane są bezpieczne. Gdy błąd zostanie naprawiony (np. nowsza wersja narzędzia),")
+        ui_info("uruchom TĘ SAMĄ komendę jeszcze raz (bez --force) – bez ponownego pobierania:")
+    else:
+        ui_info("Aby dokończyć, uruchom TĘ SAMĄ komendę jeszcze raz (bez --force):")
+    print("")
+    print("       " + rerun_command())
+    print("")
+
+
 # ---------------------------------------------------------------- geometria
 def dist_m(a, b):
     la1, lo1, la2, lo2 = map(math.radians, (a[0], a[1], b[0], b[1]))
@@ -207,12 +230,26 @@ def rdp(pts, eps_m, lat0):
     return [p for p, k in zip(pts, keep) if k]
 
 
+def simplify_ring(pts, eps_m, lat0):
+    """Uproszczenie zamkniętego obrysu. Zwykły Douglas–Peucker na obrysie, w którym pierwszy punkt = ostatni,
+    gubi wszystko (odcinek startowy ma długość 0), więc obrys rozcinamy w punkcie najdalszym od pierwszego
+    i upraszczamy obie połowy osobno. Zwraca obrys bez powtórzonego punktu końcowego."""
+    ring = pts[:-1] if len(pts) > 1 and pts[0] == pts[-1] else list(pts)
+    if len(ring) < 3 or eps_m <= 0:
+        return ring
+    cl = math.cos(math.radians(lat0))
+    far = max(range(1, len(ring)), key=lambda i: (ring[i][0] - ring[0][0]) ** 2 + ((ring[i][1] - ring[0][1]) * cl) ** 2)
+    a = rdp(ring[:far + 1], eps_m, lat0)
+    b = rdp(ring[far:] + [ring[0]], eps_m, lat0)
+    return a[:-1] + b[:-1]
+
+
 # ---------------------------------------------------------------- Overpass
-def build_query(chunk, r):
+def build_query(chunk, r, timeout=90):
     poly = ",".join("%.6f,%.6f" % (p[0], p[1]) for p in chunk)
     ar = "(around:%d,%s)" % (r, poly)
     return (
-        "[out:json][timeout:120];("
+        "[out:json][timeout:%d];(" % timeout +
         'way["highway"]["highway"!~"proposed|construction|bus_stop|platform|elevator"]%s;'
         'way["building"]%s;'
         'way["waterway"~"^(river|stream|canal|drain|ditch)$"]%s;'
@@ -335,7 +372,7 @@ def main():
     ap.add_argument("--radius", type=int, default=150, help="pas wokół trasy w metrach (domyślnie 150)")
     ap.add_argument("--chunk", type=float, default=3000.0, help="długość odcinka trasy na jedno zapytanie, m")
     ap.add_argument("--tries", type=int, default=6, help="liczba prób na odcinek")
-    ap.add_argument("--timeout", type=int, default=180, help="limit czasu jednego zapytania, s")
+    ap.add_argument("--timeout", type=int, default=90, help="limit czasu jednego zapytania, s (potem następna próba na drugim serwerze)")
     ap.add_argument("--server", help="własny serwer Overpass (adres interpretera)")
     ap.add_argument("--force", action="store_true", help="ignoruj pamięć podręczną")
     ap.add_argument("--yes", action="store_true", help="nie pytaj o zgodę")
@@ -350,6 +387,12 @@ def main():
 
     # ----- 1. trasa
     ui_head("1. Wczytywanie trasy")
+    if not os.path.isfile(a.data):
+        ui_warn("Nie ma pliku: " + a.data)
+        ui_info("Folder, w którym jesteś: " + os.getcwd())
+        ui_info("Podaj ścieżkę względem tego folderu, np. ..\\data\\<nazwa>_hrf.json (z folderu tools)")
+        ui_info("albo data/<nazwa>_hrf.json (z głównego folderu repo).")
+        return 1
     with open(a.data, encoding="utf-8-sig") as f:
         D = json.load(f)
     S = D.get("samples") or D
@@ -387,7 +430,11 @@ def main():
         for i, ch in enumerate(chunks):
             seg = sum(dist_m(ch[j - 1], ch[j]) for j in range(1, len(ch)))
             ui_info("odcinek %2d/%d  %.1f km  %s" % (i + 1, len(chunks), seg / 1000.0, "z pamięci podręcznej" if cached[i] else "DO POBRANIA"))
+    STATE["total"] = len(chunks)
+    STATE["cached"] = len(chunks) - len(todo)
     ui_info("Z pamięci podręcznej: %d,  do pobrania: %d" % (len(chunks) - len(todo), len(todo)))
+    if todo and STATE["cached"]:
+        ui_info("To jest WZNOWIENIE: odcinki z pamięci podręcznej nie będą pobierane ponownie.")
     if todo:
         ui_info("Szacunkowo: %s (zależy od obciążenia serwerów Overpass)" % fmt_time(len(todo) * 17))
         ui_info("Wysyłane są współrzędne trasy do: " + ", ".join(host(s) for s in servers))
@@ -413,7 +460,9 @@ def main():
             frac = k_done / float(n_todo)
             eta = (sum(done_times) / len(done_times) + 2) * (n_todo - k_done) if done_times else None
             ui_info("%s  %s  %s" % (bar(frac), "pobrano %d z %d" % (k_done, n_todo), ("pozostało ok. " + fmt_time(eta)) if eta else "szacuję czas..."))
-            res = fetch_overpass(build_query(ch, a.radius), label, servers, a.tries, a.timeout)
+            # linia w zapytaniu uproszczona (mniej wierzchołków = szybsze zapytanie); pas poszerzony o tolerancję uproszczenia
+            qline = rdp(ch, QUERY_EPS_M, ch[0][0])
+            res = fetch_overpass(build_query(qline, a.radius + int(QUERY_EPS_M), a.timeout), label, servers, a.tries, a.timeout)
             if res is None:
                 ui_warn("%s: NIE POBRANO po %d próbach – pomijam, spróbuj ponownie później." % (label, a.tries))
                 failed.append(i)
@@ -423,6 +472,7 @@ def main():
             with open(files[i], "w", encoding="utf-8") as f:
                 json.dump(response, f)
             dl_bytes += nbytes
+            STATE["cached"] += 1
             done_times.append(elapsed)
             k_done += 1
             ui_ok("%s pobrany: %d elementów, %s, %s (%s)" % (label, len(response.get("elements", [])), fmt_size(nbytes), fmt_time(elapsed), host(server)))
@@ -437,8 +487,8 @@ def main():
         ui_head("Pobieranie niekompletne")
         ui_warn("Brakuje %d z %d odcinków: %s" % (len(failed), len(chunks), ", ".join(str(i + 1) for i in failed)))
         ui_info("Plik wynikowy NIE został zapisany (byłby niepełny).")
-        ui_info("Uruchom komendę ponownie – pobrane odcinki są w pamięci podręcznej,")
-        ui_info("dociągnięte zostaną tylko brakujące.")
+        ui_info("Pobrane odcinki są w pamięci podręcznej, dociągnięte zostaną tylko brakujące.")
+        print_resume_hint()
         return 2
     live_clear()
     if todo:
@@ -496,12 +546,10 @@ def main():
     def add_ring(cls, pts):
         if not any(near(p) for p in pts):
             return
-        if cls == "green":
-            pts = rdp(pts, 5.0, lat0)  # tereny zielone upraszczamy
-        elif cls == "water":
-            pts = rdp(pts, 1.5, lat0)
-        if len(pts) >= 3:
-            result[cls].append(round_pts(pts, 0.8 if cls == 'building' else 0.0))
+        # tereny zielone upraszczamy mocniej, budynki prawie wcale
+        ring = simplify_ring(pts, {"green": 5.0, "water": 1.5, "building": 0.8}.get(cls, 0.0), lat0)
+        if len(ring) >= 3:
+            result[cls].append(round_pts(ring))
 
     total_el = len(elements)
     t_proc = time.time()
@@ -513,7 +561,7 @@ def main():
             live("klasyfikacja %s  %d/%d obiektów" % (bar(n_el / float(max(1, total_el))), n_el, total_el))
         tags = el.get("tags", {})
         if el["type"] == "way":
-            pts = [(g["lat"], g["lon"]) for g in el.get("geometry", [])]
+            pts = [(g["lat"], g["lon"]) for g in (el.get("geometry") or []) if g]   # Overpass bywa daje null dla brakujących punktów
             if len(pts) < 2:
                 continue
             if "highway" in tags:
@@ -532,7 +580,9 @@ def main():
             outer = []
             for m in el.get("members", []):
                 if m.get("role") == "outer" and m.get("geometry"):
-                    outer.append([(g["lat"], g["lon"]) for g in m["geometry"]])
+                    seg = [(g["lat"], g["lon"]) for g in m["geometry"] if g]
+                    if len(seg) >= 2:
+                        outer.append(seg)
             for ring in join_rings(outer):
                 add_ring(k, ring)
     live_clear()
@@ -564,6 +614,15 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         live_clear()
         print("")
-        print("  [!]  PRZERWANO (Ctrl+C). Pobrane odcinki zostały w pamięci podręcznej –")
-        print("       uruchom komendę ponownie, aby dokończyć. Plik wynikowy nie został zmieniony.")
+        print("  [!]  PRZERWANO (Ctrl+C). Plik wynikowy nie został zmieniony.")
+        print_resume_hint()
         sys.exit(130)
+    except Exception:
+        live_clear()
+        import traceback
+        traceback.print_exc()
+        print("")
+        print("  [!]  Nieoczekiwany błąd (szczegóły wyżej).")
+        if STATE["total"]:
+            print_resume_hint(after_fix=True)
+        sys.exit(1)
