@@ -28,6 +28,11 @@ Nakładka danych (prędkość, tętno, wysokość, mapa, mini mapa 3D, profil…
 `Blender/hrf_blender_route.py` buduje z tego samego pliku `*_hrf.json` scenę: ścieżka z prawdziwą wysokością (oś Z),
 strzałka jadąca po trasie i kamera. W Blenderze: zakładka Scripting → Open → ten plik → (opcjonalnie ustaw `DATA_PATH`
 w `CONFIG`) → Run Script. Potem Render → Render Animation: PNG z przezroczystością w `hrf_render/`, do nałożenia w AE.
+**Panel w Blenderze:** po uruchomieniu skrypt dodaje do okna 3D panel (klawisz `N` → zakładka **HRF**):
+„Przebuduj scenę" (po zmianie przewyższenia, terenu, pliku), „Zastosuj czas i kamerę" (szybko, ok. 0,1 s),
+kolory, grubość linii, rozmiar strzałki i słońce zmieniają się na żywo, są też przyciski renderu klatki i animacji.
+Wartości zapisują się w scenie `.blend`; żeby panel wracał po otwarciu pliku, zaznacz „Register" przy skrypcie
+w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym przy każdym uruchomieniu skryptu.
 - `CAM_MODE = "chase"` – kamera za strzałką i nad nią (okno klipu: `START_S` + `DURATION_S`, czas rzeczywisty).
 - `CAM_MODE = "orbit"` + `MODE = "full"` – cała jazda w kadrze, kamera krąży wokół trasy (`ORBIT_TURNS`), strzałka jedzie
   po trasie; przelot skompresowany do `FULL_SECONDS` sekund.
