@@ -12,7 +12,9 @@ Nakładka danych (prędkość, tętno, wysokość, mapa, mini mapa 3D, profil…
 ## Najszybciej: program z oknem (`HRF.pyw`)
 `py HRF.pyw` (albo dwuklik) otwiera jedno okno ze wszystkimi narzędziami w zakładkach w kolejności pracy: **Dane** (FIT/GPX → JSON),
 **Teren**, **Warstwice**, **Wycinek lokalny**, **OSM**, **Blender** (uruchamia scenę dla wybranego projektu), **After Effects**
-(instrukcja i ścieżki). U góry wybierasz projekt (podfolder `data/`), pasek pokazuje, których plików jeszcze brakuje.
+(instrukcja i ścieżki). U góry wybierasz projekt (podfolder `data/` albo dowolny folder z dysku), pasek pokazuje, których plików jeszcze brakuje.
+**Nowy projekt…** (menu Plik albo przycisk u góry): wskazujesz plik FIT/GPX i folder projektu (dowolny, nowy lub istniejący), a program sam
+kopiuje plik do `zrodlo/`, konwertuje go i – wedle zaznaczenia – pobiera teren, rysuje warstwice i (opcjonalnie) pobiera OSM, wszystko w tym folderze.
 Najedź myszą na dowolne pole lub przycisk – pojawia się podpowiedź, co dokładnie robi. Wynik narzędzi, postęp i błędy są w dolnym
 logu, przycisk **Anuluj zadanie** przerywa pracę w dowolnej chwili (pobrane dane zostają w `cache/`). Przed każdym połączeniem
 z internetem okno mówi, co zostanie wysłane. Program tylko uruchamia skrypty z `tools/` – to te same komendy, które opisano niżej

@@ -22,6 +22,7 @@ data/
 ```
 
 Zasady:
+- Projekt nie musi leżeć w `data/`: w programie `HRF.pyw` możesz wskazać dowolny folder na dysku (układ w środku jest taki sam).
 - Skrypt Blendera i narzędzia szukają plików **w folderze projektu**; wystarczy, że wskażesz `<projekt>_hrf.json`.
 - Starsze pamięci podręczne `<plik>.cache` są przenoszone do `cache/` automatycznie przy pierwszym użyciu narzędzia.
 - Kopię projektu (np. na dysk zewnętrzny) robisz kopiując cały podfolder; usunięcie `cache/` odzyskuje miejsce

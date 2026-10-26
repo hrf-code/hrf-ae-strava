@@ -9,7 +9,7 @@ Najedź myszą na dowolne pole lub przycisk – pojawi się podpowiedź, co dok�
 Program niczego nie liczy sam: uruchamia skrypty z folderu tools/ (te same, które można wołać z terminala)
 i pokazuje ich wynik w dolnym logu. Dane każdej aktywności leżą w osobnym folderze data/<projekt>/.
 """
-import glob, json, os, queue, re, shutil, subprocess, sys, threading, time
+import glob, json, os, queue, re, shutil, subprocess, sys, threading, time, webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -19,6 +19,8 @@ DATA = os.path.join(ROOT, "data")
 BLENDER_SCRIPT = os.path.join(ROOT, "Blender", "hrf_blender_route.py")
 AE_PANEL = os.path.join(ROOT, "AE", "hrf_ae_panel.jsx")
 SETTINGS = os.path.join(ROOT, "_local", "hrf_gui.json")
+VERSION = "1.0"
+REPO_URL = "https://github.com/hrf-code/hrf-ae-strava"
 
 NET_INFO = {
     "teren": ("Do serwera kafelków wysokości (s3.amazonaws.com, otwarte dane Terrarium) trafią tylko numery kafelków (z/x/y) "
@@ -38,6 +40,16 @@ def python_exe():
         if os.path.isfile(cand):
             return cand
     return exe
+
+
+def git_revision():
+    """Krótki skrót bieżącego commita (do podpisu wersji); puste, gdy to nie jest kopia z gita."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True, timeout=3,
+                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
 
 
 def fmt_size(n):
@@ -145,6 +157,11 @@ class App:
         self._buf = ""
         self.intro_labels = []
         root.title("HRF – trasa ze Stravy: narzędzia")
+        try:
+            self.icon = tk.PhotoImage(file=os.path.join(ROOT, "assets", "hrf_icon.png"))
+            root.iconphoto(True, self.icon)
+        except Exception:
+            pass
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         root.geometry("%dx%d+20+20" % (min(1080, sw - 60), min(820, sh - 100)))
         root.minsize(760, 560)
@@ -153,7 +170,10 @@ class App:
         except Exception:
             pass
         self.settings = self.load_settings()
+        self.extra = [x for x in self.settings.get("extra", []) if isinstance(x, str)]
+        self.proj_map = {}
         self.build_vars()
+        self.build_menu()
         self.build_header()
         self.build_status()
         self.build_log()
@@ -173,7 +193,7 @@ class App:
         try:
             os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
             with open(SETTINGS, "w", encoding="utf-8") as f:
-                json.dump({"project": self.project.get(), "blender": self.blender.get()}, f, ensure_ascii=False)
+                json.dump({"project": self.pdir() or "", "extra": self.extra, "blender": self.blender.get()}, f, ensure_ascii=False)
         except Exception:
             pass
 
@@ -181,7 +201,7 @@ class App:
     def build_vars(self):
         V = tk.StringVar
         self.project = V()
-        self.src, self.new_name = V(), V()
+        self.src, self.new_name, self.proj_dir = V(), V(), V()
         self.act_name, self.start_code, self.end_code, self.zones, self.tz = V(), V(value="START"), V(value="META"), V(value="116,145,159,174"), V()
         self.ascent, self.moving, self.distance = V(), V(), V()
         self.t_margin, self.t_zoom, self.t_step = V(value="15000"), V(value="12"), V(value="60")
@@ -234,21 +254,53 @@ class App:
         self.intro_labels.append(lab)
         return lab
 
+    # ---- menu
+    def build_menu(self):
+        bar = tk.Menu(self.root)
+        plik = tk.Menu(bar, tearoff=0)
+        plik.add_command(label="Nowy projekt z pliku FIT/GPX…", command=self.new_project_dialog)
+        plik.add_command(label="Dodaj istniejący folder projektu…", command=self.add_existing_folder)
+        plik.add_command(label="Otwórz folder projektu", command=self.open_project_folder)
+        plik.add_command(label="Otwórz folder data/", command=lambda: self.open_folder(self.data_dir))
+        plik.add_separator()
+        plik.add_command(label="Zakończ", command=self.quit)
+        bar.add_cascade(label="Plik", menu=plik)
+        pomoc = tk.Menu(bar, tearoff=0)
+        pomoc.add_command(label="Jak to działa (przepływ pracy)", command=lambda: self.nb.select(self.tabs["start"]))
+        pomoc.add_command(label="O programie", command=lambda: self.nb.select(self.tabs["about"]))
+        pomoc.add_separator()
+        pomoc.add_command(label="Strona projektu na GitHubie", command=lambda: webbrowser.open(REPO_URL))
+        pomoc.add_command(label="Otwórz folder programu", command=lambda: self.open_folder(ROOT))
+        bar.add_cascade(label="Pomoc", menu=pomoc)
+        self.root.config(menu=bar)
+
+    def open_folder(self, d):
+        if d and os.path.isdir(d):
+            os.startfile(d) if os.name == "nt" else subprocess.Popen(["xdg-open", d])
+
+    def quit(self):
+        self.save_settings()
+        self.root.destroy()
+
     # ---- nagłówek z wyborem projektu
     def build_header(self):
         f = ttk.Frame(self.root, padding=(10, 8, 10, 2))
         f.pack(fill="x")
         lab = ttk.Label(f, text="Projekt (aktywność):", font=("Segoe UI", 10, "bold"))
         lab.pack(side="left")
-        self.tip(lab, "Jeden projekt = jedna aktywność = jeden folder data/<projekt>/. Wszystkie pliki (dane, teren, warstwice, OSM, wycinek, "
-                      "pamięć podręczna) leżą w tym folderze. Wybierz istniejący albo utwórz nowy z pliku FIT/GPX.")
-        self.cb = ttk.Combobox(f, textvariable=self.project, state="readonly", width=34)
+        self.tip(lab, "Jeden projekt = jedna aktywność = jeden folder (domyślnie data/<projekt>/, ale może leżeć gdziekolwiek na dysku). Wszystkie pliki (dane, teren, "
+                      "warstwice, OSM, wycinek, pamięć podręczna) leżą w tym folderze. Wybierz istniejący albo utwórz nowy z pliku FIT/GPX.")
+        self.cb = ttk.Combobox(f, textvariable=self.project, state="readonly", width=44)
         self.cb.pack(side="left", padx=8)
         self.cb.bind("<<ComboboxSelected>>", lambda e: self.on_project())
-        self.tip(self.cb, "Lista folderów w data/. Zmiana projektu odświeża stan plików poniżej.")
+        self.tip(self.cb, "Podfoldery data/ oraz foldery dodane z dysku (pokazane razem ze ścieżką). Zmiana projektu odświeża stan plików poniżej.")
         b = ttk.Button(f, text="Odśwież", command=lambda: self.refresh_projects(select=self.project.get()))
         b.pack(side="left")
         self.tip(b, "Ponownie czyta folder data/ (np. po ręcznym skopiowaniu plików).")
+        b = ttk.Button(f, text="Dodaj folder…", command=self.add_existing_folder)
+        b.pack(side="left", padx=6)
+        self.tip(b, "Dodaje do listy istniejący folder projektu z dowolnego miejsca na dysku (taki, w którym jest plik *_hrf.json). "
+                    "Projekty z folderu data/ pojawiają się na liście same.")
         b = ttk.Button(f, text="Otwórz folder projektu", command=self.open_project_folder)
         b.pack(side="left", padx=6)
         self.tip(b, "Otwiera folder data/<projekt>/ w Eksploratorze Windows.")
@@ -278,7 +330,7 @@ class App:
         self.nb.pack(fill="both", expand=True, padx=10, pady=6)
         self.tabs = {}
         for key, title in (("start", "Start"), ("dane", "1. Dane"), ("teren", "2. Teren"), ("warstwice", "3. Warstwice"),
-                           ("wycinek", "4. Wycinek lokalny"), ("osm", "5. OSM"), ("blender", "6. Blender"), ("ae", "7. After Effects")):
+                           ("wycinek", "4. Wycinek lokalny"), ("osm", "5. OSM"), ("blender", "6. Blender"), ("ae", "7. After Effects"), ("about", "O programie")):
             fr = ttk.Frame(self.nb)
             self.nb.add(fr, text=title)
             self.tabs[key] = fr
@@ -290,6 +342,7 @@ class App:
         self.tab_osm(self.tabs["osm"])
         self.tab_blender(self.tabs["blender"])
         self.tab_ae(self.tabs["ae"])
+        self.tab_about(self.tabs["about"])
         self.root.bind("<Configure>", self.on_resize, add="+")
 
     def on_resize(self, e):
@@ -311,9 +364,9 @@ class App:
                "7. After Effects – panel z nakładką danych nad wideo (liczniki, mapa, profil); nakładasz też render z Blendera.")
         lab = ttk.Label(f, text=txt, justify="left")
         lab.pack(fill="x", padx=14, pady=4)
-        self.intro(f, "Gdzie są pliki: data/<projekt>/ zawiera <projekt>_hrf.json, hrf_terrain.json, hrf_contours.(png/pdf/svg), hrf_local.*, "
+        self.intro(f, "Gdzie są pliki: folder projektu (domyślnie data/<projekt>/, ale możesz wskazać dowolny folder na dysku) zawiera <nazwa>_hrf.json, hrf_terrain.json, hrf_contours.(png/pdf/svg), hrf_local.*, "
                       "hrf_osm.json, folder zrodlo/ (oryginalny FIT/GPX) i folder cache/ (pobrane kafelki, odcinki OSM, logi). "
-                      "Folder data/ jest prywatny i nie trafia do GitHuba. Najedź myszą na dowolne pole lub przycisk, żeby zobaczyć podpowiedź.")
+                      "Folder data/ jest prywatny i nie trafia do GitHuba; własny folder projektu program tylko zapamiętuje, niczego poza nim nie rusza. Najedź myszą na dowolne pole lub przycisk, żeby zobaczyć podpowiedź.")
 
     def tab_dane(self, f):
         self.intro(f, "Konwertuje plik FIT/GPX na dane dla Blendera i After Effects (<projekt>/<projekt>_hrf.json). Działa bez internetu "
@@ -323,23 +376,26 @@ class App:
         self.field(g, 0, "Plik źródłowy (.fit/.gpx):", self.src, "Plik pobrany ze Stravy: aktywność → ‘⋯’ → Eksportuj oryginał (FIT) albo Eksportuj GPX. "
                    "Obsługiwane też .gz. Plik zostanie skopiowany do folderu projektu (zrodlo/), oryginał zostaje nietknięty.",
                    width=52, browse=self.pick_source)
-        self.field(g, 1, "Nazwa projektu:", self.new_name, "Nazwa folderu data/<nazwa>/. Domyślnie z nazwy pliku. Jeśli folder już istnieje, dane w nim zostaną "
-                   "zaktualizowane (stary plik *_hrf.json nadpisany).", width=30)
-        self.field(g, 2, "Nazwa aktywności:", self.act_name, "Tekst nazwy w danych (np. do napisu). Puste = z pliku GPX albo z nazwy pliku.", width=40)
-        self.field(g, 3, "Kod startu / mety:", self.start_code, "Krótki napis przy punkcie startu na mapie (np. NS). Domyślnie START.", width=10)
-        ttk.Entry(g, textvariable=self.end_code, width=10).grid(row=3, column=2, sticky="w", padx=4)
-        self.tip(g.grid_slaves(row=3, column=2)[0], "Krótki napis przy mecie na mapie (np. PRZ). Domyślnie META.")
-        self.field(g, 4, "Strefy tętna (górne granice):", self.zones, "Cztery górne granice stref Z1–Z4 w bpm, oddzielone przecinkami. Domyślnie 116,145,159,174.", width=24)
-        self.field(g, 5, "Strefa czasowa:", self.tz, "Do czasu lokalnego startu, np. Europe/Warsaw. Puste = strefa tego komputera. "
+        self.field(g, 1, "Folder projektu:", self.proj_dir, "Dowolny folder na dysku (nowy lub istniejący). Program skopiuje tu plik źródłowy do podfolderu zrodlo/ "
+                   "i zapisze tu wszystkie wyniki: dane, teren, warstwice, OSM i pamięć podręczną. Puste = data/<nazwa projektu>/ w folderze programu.",
+                   width=52, browse=self.pick_folder)
+        self.field(g, 2, "Nazwa projektu:", self.new_name, "Nazwa plików danych (<nazwa>_hrf.json) i, gdy nie wskażesz folderu, nazwa folderu data/<nazwa>/. "
+                   "Domyślnie z nazwy pliku. Jeśli dane już tam są, stary plik *_hrf.json zostanie nadpisany.", width=30)
+        self.field(g, 3, "Nazwa aktywności:", self.act_name, "Tekst nazwy w danych (np. do napisu). Puste = z pliku GPX albo z nazwy pliku.", width=40)
+        self.field(g, 4, "Kod startu / mety:", self.start_code, "Krótki napis przy punkcie startu na mapie (np. NS). Domyślnie START.", width=10)
+        ttk.Entry(g, textvariable=self.end_code, width=10).grid(row=4, column=2, sticky="w", padx=4)
+        self.tip(g.grid_slaves(row=4, column=2)[0], "Krótki napis przy mecie na mapie (np. PRZ). Domyślnie META.")
+        self.field(g, 5, "Strefy tętna (górne granice):", self.zones, "Cztery górne granice stref Z1–Z4 w bpm, oddzielone przecinkami. Domyślnie 116,145,159,174.", width=24)
+        self.field(g, 6, "Strefa czasowa:", self.tz, "Do czasu lokalnego startu, np. Europe/Warsaw. Puste = strefa tego komputera. "
                    "Na Windowsie może wymagać: py -m pip install tzdata.", width=24)
-        ttk.Separator(g, orient="horizontal").grid(row=6, column=0, columnspan=4, sticky="ew", pady=8)
-        ttk.Label(g, text="Wyrównanie sum do Stravy (opcjonalne):").grid(row=7, column=0, columnspan=3, sticky="w")
-        self.field(g, 8, "Podjazdy:", self.ascent, "Suma podjazdów ze strony Stravy w metrach. Wtedy podjazdy w danych zostaną przeskalowane do tej wartości "
+        ttk.Separator(g, orient="horizontal").grid(row=7, column=0, columnspan=4, sticky="ew", pady=8)
+        ttk.Label(g, text="Wyrównanie sum do Stravy (opcjonalne):").grid(row=8, column=0, columnspan=3, sticky="w")
+        self.field(g, 9, "Podjazdy:", self.ascent, "Suma podjazdów ze strony Stravy w metrach. Wtedy podjazdy w danych zostaną przeskalowane do tej wartości "
                    "(bez tego liczą się z samego pliku i mogą się nieco różnić).", width=10, unit="m")
-        self.field(g, 9, "Czas ruchu:", self.moving, "Czas ruchu ze Stravy w sekundach (np. 12216 = 3 h 23 min 36 s).", width=10, unit="s")
-        self.field(g, 10, "Dystans:", self.distance, "Dystans ze Stravy w kilometrach (np. 59.6).", width=10, unit="km")
+        self.field(g, 10, "Czas ruchu:", self.moving, "Czas ruchu ze Stravy w sekundach (np. 12216 = 3 h 23 min 36 s).", width=10, unit="s")
+        self.field(g, 11, "Dystans:", self.distance, "Dystans ze Stravy w kilometrach (np. 59.6).", width=10, unit="km")
         b = self.action(f, "Konwertuj → utwórz projekt", self.do_convert,
-                        "Kopiuje plik do data/<projekt>/zrodlo/ i zapisuje data/<projekt>/<projekt>_hrf.json. Potem wybierz kolejny krok (2. Teren).")
+                        "Kopiuje plik do <folder projektu>/zrodlo/ i zapisuje tam <nazwa>_hrf.json. Potem wybierz kolejny krok (2. Teren).")
         b.pack(anchor="w", padx=14, pady=10)
 
     def tab_teren(self, f):
@@ -449,6 +505,12 @@ class App:
         g.pack(anchor="w", padx=14, pady=4)
         self.blender_cb = self.field(g, 0, "Wersja Blendera:", self.blender, "Wykryte instalacje w C:\\Program Files\\Blender Foundation. Skrypt był testowany na 4.4, 4.5, 5.0 i 5.2.",
                                      width=60, choices=[])
+        self.blender_data = tk.StringVar()
+        lab = ttk.Label(f, textvariable=self.blender_data, font=("Segoe UI", 10, "bold"), wraplength=900, justify="left")
+        lab.pack(anchor="w", padx=14, pady=(8, 0))
+        self.intro_labels.append(lab)
+        self.tip(lab, "Plik danych, z którego Blender zbuduje scenę: najnowszy *_hrf.json z folderu projektu wybranego na liście u góry okna. "
+                      "Żeby zbudować scenę dla innej jazdy, wybierz jej projekt na liście (albo najpierw ją skonwertuj w zakładce 1. Dane).")
         b = self.action(f, "Uruchom Blendera ze sceną", self.do_blender,
                         "Startuje Blendera i buduje scenę z pliku *_hrf.json wybranego projektu (a teren, warstwice i OSM bierze z folderu projektu). "
                         "Blender otwiera się w osobnym oknie.")
@@ -477,6 +539,51 @@ class App:
         b = ttk.Button(r, text="Pokaż plik OSM", command=lambda: self.reveal(self.pfile("hrf_osm.json")))
         b.pack(side="left")
         self.tip(b, "Otwiera Eksplorator z zaznaczonym hrf_osm.json (opcjonalne otoczenie dla mini mapy 3D w AE).")
+
+    def tab_about(self, f):
+        top = ttk.Frame(f)
+        top.pack(fill="x", padx=14, pady=(14, 6))
+        if getattr(self, "icon", None) is not None:
+            small = self.icon.subsample(4, 4)
+            self.about_icon = small
+            ttk.Label(top, image=small).pack(side="left", padx=(0, 14))
+        info = ttk.Frame(top)
+        info.pack(side="left")
+        ttk.Label(info, text="HRF – dane ze Stravy w After Effects i Blenderze", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        rev = git_revision()
+        ttk.Label(info, text="Wersja %s%s  •  autor: HRF (haraf.pl)" % (VERSION, " (" + rev + ")" if rev else ""), foreground="#555").pack(anchor="w")
+        link = ttk.Label(info, text=REPO_URL, foreground="#1a5fb4", cursor="hand2")
+        link.pack(anchor="w")
+        link.bind("<Button-1>", lambda e: webbrowser.open(REPO_URL))
+        self.tip(link, "Otwiera stronę projektu na GitHubie (kod, opis, historia zmian) w przeglądarce.")
+        sections = [
+            ("Co to robi",
+             ["Z jednego pliku FIT/GPX ze Stravy robi komplet materiałów do filmu z jazdy: nakładkę z danymi dla After Effects "
+              "(prędkość, tętno, wysokość, mapa trasy, profil, mini mapa 3D) oraz animowaną scenę 3D w Blenderze "
+              "(trasa z prawdziwą wysokością, strzałka jadąca po trasie, kamera orbitująca albo jadąca za strzałką, teren, warstwice)."]),
+            ("Z czego się składa",
+             ["•  tools/ – narzędzia Pythona (konwerter, teren, warstwice, tekstura lokalna, OSM); to one wykonują całą pracę,",
+              "•  Blender/hrf_blender_route.py – skrypt budujący scenę i panel sterowania HRF w Blenderze,",
+              "•  AE/hrf_ae_panel.jsx – panel dla After Effects,",
+              "•  HRF.pyw – to okno: wybór projektu, uruchamianie narzędzi, log, podpowiedzi przy każdej kontrolce."]),
+            ("Prywatność",
+             ["Plik aktywności i ślad GPS zostają na Twoim dysku (folder data/ nie trafia do GitHuba). Z internetu pobierane są tylko: "
+              "wysokości terenu (wysyłane są wyłącznie numery kafelków, nie trasa) i – opcjonalnie – dane OpenStreetMap wzdłuż trasy; "
+              "przed każdym takim połączeniem program mówi, co zostanie wysłane i pyta o zgodę."]),
+            ("Źródła danych (podaj je przy publikacji filmu)",
+             ["•  Wysokości terenu: Mapzen / AWS Terrain Tiles (SRTM, NED i inne otwarte zbiory),",
+              "•  Drogi, budynki, woda, zieleń: © współtwórcy OpenStreetMap (licencja ODbL), pobierane przez Overpass API."]),
+            ("Wymagania",
+             ["Python 3 z tkinter (okno i narzędzia), opcjonalnie fitparse dla plików .fit, Blender 4.4–5.2, After Effects."]),
+        ]
+        body = tk.Text(f, wrap="word", font=("Segoe UI", 10), relief="flat", background=self.root.cget("background"), height=22, borderwidth=0)
+        body.pack(fill="both", expand=True, padx=14, pady=6)
+        body.tag_config("h", font=("Segoe UI", 10, "bold"), spacing1=4)
+        nl = chr(10)
+        for head, lines in sections:
+            body.insert("end", head + nl, "h")
+            body.insert("end", nl.join(lines) + nl + nl)
+        body.config(state="disabled")
 
     # ---- dolny log
     def build_log(self):
@@ -508,19 +615,45 @@ class App:
 
     # ---- projekt
     def list_projects(self):
-        if not os.path.isdir(self.data_dir):
-            return []
-        return sorted(d for d in os.listdir(self.data_dir) if os.path.isdir(os.path.join(self.data_dir, d)) and not d.startswith(("_", ".")))
+        """Etykieta -> ścieżka. Podfoldery data/ pokazują się samą nazwą, foldery z innych miejsc dysku nazwą i ścieżką."""
+        found = {}
+        if os.path.isdir(self.data_dir):
+            for d in sorted(os.listdir(self.data_dir)):
+                full = os.path.join(self.data_dir, d)
+                if os.path.isdir(full) and not d.startswith(("_", ".")) and (glob.glob(os.path.join(full, "*_hrf.json")) or os.path.isdir(os.path.join(full, "zrodlo"))):
+                    found[d] = full
+        for path in self.extra:
+            if os.path.isdir(path) and not self.in_data(path):
+                found["%s   [%s]" % (os.path.basename(path.rstrip("\\/")) or path, path)] = path
+        return found
+
+    def in_data(self, path):
+        a, b = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(self.data_dir))
+        return os.path.dirname(a) == b
+
+    def register_project(self, path):
+        path = os.path.abspath(path)
+        if not self.in_data(path) and path not in self.extra:
+            self.extra.append(path)
+        self.save_settings()
 
     def refresh_projects(self, select=None):
-        projects = self.list_projects()
-        self.cb["values"] = projects
-        if select in projects:
-            self.project.set(select)
-        elif projects and self.project.get() not in projects:
-            self.project.set(projects[0])
-        elif not projects:
-            self.project.set("")
+        self.proj_map = self.list_projects()
+        labels = list(self.proj_map)
+        self.cb["values"] = labels
+        want = None
+        if select:
+            if select in self.proj_map:
+                want = select
+            else:
+                for lab, path in self.proj_map.items():
+                    if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(select)):
+                        want = lab
+                        break
+        if want:
+            self.project.set(want)
+        elif self.project.get() not in self.proj_map:
+            self.project.set(labels[0] if labels else "")
         blenders = find_blenders()
         self.blender_cb["values"] = blenders
         if blenders and (self.blender.get() not in blenders):
@@ -528,8 +661,7 @@ class App:
         self.on_project()
 
     def pdir(self):
-        p = self.project.get()
-        return os.path.join(self.data_dir, p) if p else None
+        return self.proj_map.get(self.project.get())
 
     def pfile(self, name):
         d = self.pdir()
@@ -561,6 +693,12 @@ class App:
                 lab.config(text="✔ %s%s: %s" % (text, extra, fmt_size(size)), foreground="#1a7f2e")
             else:
                 lab.config(text="✘ %s: brak" % text, foreground="#b03030")
+        if hasattr(self, "blender_data"):
+            act = self.activity_file()
+            if act:
+                self.blender_data.set("Scena powstanie z projektu „%s”: %s" % (self.project.get().split("   [")[0], act))
+            else:
+                self.blender_data.set("Projekt „%s” nie ma jeszcze danych (*_hrf.json) – najpierw skonwertuj plik w zakładce 1. Dane." % (self.project.get() or "—"))
         self.save_settings()
 
     def open_project_folder(self):
@@ -592,26 +730,88 @@ class App:
         self.progress_lbl.config(text="Skopiowano do schowka.")
 
     # ---- dialogi
+    def source_stem(self, path):
+        stem = os.path.basename(path)
+        for ext in (".gz", ".fit", ".gpx"):
+            if stem.lower().endswith(ext):
+                stem = stem[:-len(ext)]
+        return safe_name(stem)
+
     def pick_source(self):
         p = filedialog.askopenfilename(title="Plik aktywności", filetypes=[("FIT/GPX", "*.fit *.gpx *.fit.gz *.gpx.gz"), ("Wszystkie", "*.*")])
         if p:
             self.src.set(p)
-            stem = os.path.basename(p)
-            for ext in (".gz", ".fit", ".gpx"):
-                if stem.lower().endswith(ext):
-                    stem = stem[:-len(ext)]
-            self.new_name.set(safe_name(stem))
+            self.new_name.set(self.source_stem(p))
+
+    def pick_folder(self):
+        d = filedialog.askdirectory(title="Folder projektu (może być nowy)", initialdir=self.proj_dir.get() or self.data_dir, mustexist=False)
+        if d:
+            self.proj_dir.set(os.path.normpath(d))
 
     def new_project_dialog(self):
-        p = filedialog.askopenfilename(title="Plik FIT/GPX nowego projektu", filetypes=[("FIT/GPX", "*.fit *.gpx *.fit.gz *.gpx.gz"), ("Wszystkie", "*.*")])
-        if p:
-            self.src.set(p)
-            stem = os.path.basename(p)
-            for ext in (".gz", ".fit", ".gpx"):
-                if stem.lower().endswith(ext):
-                    stem = stem[:-len(ext)]
-            self.new_name.set(safe_name(stem))
-            self.nb.select(self.tabs["dane"])
+        """Jedno okno: plik FIT/GPX + folder projektu + co przygotować. Po „Utwórz projekt” wszystko dzieje się samo."""
+        if self.job is not None:
+            messagebox.showinfo("Zadanie trwa", "Poczekaj na koniec bieżącego zadania albo je anuluj.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Nowy projekt")
+        win.transient(self.root)
+        win.resizable(False, False)
+        g = ttk.Frame(win, padding=14)
+        g.pack(fill="both", expand=True)
+        ttk.Label(g, text="Wskaż plik z aktywnością i folder, w którym ma powstać projekt. Program skopiuje tam plik, skonwertuje go na dane "
+                          "i od razu przygotuje resztę.", wraplength=620, justify="left").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+
+        def browse_src():
+            self.pick_source()
+            if self.src.get() and not self.proj_dir.get():
+                pass
+        self.field(g, 1, "Plik FIT/GPX:", self.src, "Plik ze Stravy (.fit, .gpx, także .gz). Zostanie skopiowany do <folder projektu>/zrodlo/, oryginał zostaje nietknięty.",
+                   width=54, browse=browse_src)
+        self.field(g, 2, "Folder projektu:", self.proj_dir, "Dowolny folder na dysku (nowy lub istniejący): tu powstaną dane, teren, warstwice i pamięć podręczna. "
+                   "Puste = data/<nazwa projektu>/ w folderze programu.", width=54, browse=self.pick_folder)
+        self.field(g, 3, "Nazwa projektu:", self.new_name, "Nazwa plików danych (<nazwa>_hrf.json). Domyślnie z nazwy pliku.", width=30)
+        ttk.Separator(g, orient="horizontal").grid(row=4, column=0, columnspan=4, sticky="ew", pady=8)
+        ttk.Label(g, text="Po konwersji przygotuj od razu (ustawienia z zakładek 2 i 3):").grid(row=5, column=0, columnspan=4, sticky="w")
+        self.want_terrain, self.want_contours, self.want_osm = tk.BooleanVar(value=True), tk.BooleanVar(value=True), tk.BooleanVar(value=False)
+        c = self.check(g, "Teren (internet: numery kafelków wysokości)", self.want_terrain, "Pobiera wysokości terenu wokół trasy (zakładka 2. Teren: margines, zoom, oczko). "
+                       "Bez tego nie powstanie teren w Blenderze.")
+        c.grid(row=6, column=0, columnspan=4, sticky="w", pady=2)
+        c = self.check(g, "Warstwice całego terenu (PNG)", self.want_contours, "Rysuje czarno-białą teksturę warstwic (zakładka 3. Warstwice). Wymaga terenu.")
+        c.grid(row=7, column=0, columnspan=4, sticky="w", pady=2)
+        c = self.check(g, "Otoczenie z OpenStreetMap (internet, opcjonalne, wolne)", self.want_osm, "Drogi, budynki, woda i zieleń do mini mapy w After Effects. "
+                       "Wysyła współrzędne odcinków trasy do serwera Overpass; może trwać długo – można zrobić później w zakładce 5. OSM.")
+        c.grid(row=8, column=0, columnspan=4, sticky="w", pady=2)
+        row = ttk.Frame(g)
+        row.grid(row=9, column=0, columnspan=4, sticky="e", pady=(12, 0))
+
+        def go():
+            if not self.src.get().strip() or not os.path.isfile(self.src.get().strip().strip('"')):
+                messagebox.showwarning("Plik", "Wskaż istniejący plik .fit lub .gpx.", parent=win)
+                return
+            steps = [name for name, on in (("terrain", self.want_terrain.get()), ("contours", self.want_contours.get()), ("osm", self.want_osm.get())) if on]
+            net = [k for k, on in (("teren", self.want_terrain.get()), ("osm", self.want_osm.get())) if on]
+            if net and not messagebox.askyesno("Połączenie z internetem", "\n\n".join(NET_INFO[k] for k in net) + "\n\nKontynuować?", parent=win):
+                return
+            win.destroy()
+            self.do_convert(chain=steps)
+        b = ttk.Button(row, text="Utwórz projekt", command=go)
+        b.pack(side="right")
+        self.tip(b, "Kopiuje plik do folderu projektu, konwertuje go i po kolei przygotowuje zaznaczone rzeczy. Postęp widać w logu; Anuluj zadanie przerywa.")
+        b2 = ttk.Button(row, text="Anuluj", command=win.destroy)
+        b2.pack(side="right", padx=8)
+        self.tip(b2, "Zamyka okno bez tworzenia projektu.")
+        win.grab_set()
+
+    def add_existing_folder(self):
+        d = filedialog.askdirectory(title="Istniejący folder projektu (z plikiem *_hrf.json)", initialdir=self.data_dir)
+        if not d:
+            return
+        if not glob.glob(os.path.join(d, "*_hrf.json")):
+            if not messagebox.askyesno("Brak danych", "W tym folderze nie ma jeszcze pliku *_hrf.json (konwersji). Dodać go mimo to jako projekt?"):
+                return
+        self.register_project(d)
+        self.refresh_projects(select=d)
 
     def paste_command(self):
         win = tk.Toplevel(self.root)
@@ -767,7 +967,7 @@ class App:
             return None
         return v
 
-    def do_convert(self):
+    def do_convert(self, chain=None):
         src = self.src.get().strip().strip('"')
         if not src or not os.path.isfile(src):
             messagebox.showwarning("Plik", "Wskaż istniejący plik .fit lub .gpx.")
@@ -780,10 +980,15 @@ class App:
                 if not messagebox.askyesno("Brak biblioteki fitparse", "Pliki .fit czyta biblioteka fitparse (darmowa, jednorazowa instalacja przez pip z internetu).\n\n"
                                            "Zainstalować teraz? (Dla plików .gpx nie jest potrzebna.)"):
                     return
-                self.run_job("Instalacja fitparse", [python_exe(), "-m", "pip", "install", "fitparse"], after=self.do_convert)
+                self.run_job("Instalacja fitparse", [python_exe(), "-m", "pip", "install", "fitparse"], after=lambda: self.do_convert(chain))
                 return
-        proj = os.path.join(self.data_dir, name)
-        os.makedirs(os.path.join(proj, "zrodlo"), exist_ok=True)
+        chosen = self.proj_dir.get().strip().strip('"')
+        proj = os.path.abspath(chosen) if chosen else os.path.join(self.data_dir, name)
+        try:
+            os.makedirs(os.path.join(proj, "zrodlo"), exist_ok=True)
+        except OSError as e:
+            messagebox.showerror("Folder projektu", "Nie można utworzyć folderu:\n%s" % e)
+            return
         dst = os.path.join(proj, "zrodlo", os.path.basename(src))
         if os.path.abspath(src) != os.path.abspath(dst):
             shutil.copy2(src, dst)
@@ -800,22 +1005,41 @@ class App:
                 args += [flag, "%g" % v]
 
         def after():
-            self.refresh_projects(select=name)
-            self.nb.select(self.tabs["teren"])
-        self.run_job("Konwersja %s → projekt %s" % (os.path.basename(src), name), args, after=after)
+            self.register_project(proj)
+            self.refresh_projects(select=proj)
+            if chain is not None:
+                self.run_chain(list(chain))
+            else:
+                self.nb.select(self.tabs["teren"])
+        self.run_job("Konwersja %s → %s" % (os.path.basename(src), proj), args, after=after)
 
-    def do_terrain(self):
+    def run_chain(self, steps):
+        """Kolejne kroki przygotowania projektu (teren, warstwice, OSM) – każdy startuje po poprawnym końcu poprzedniego."""
+        if not steps:
+            self.logw("\nProjekt gotowy: %s" % (self.pdir() or ""), "ok")
+            self.nb.select(self.tabs["blender"])
+            return
+        step, rest = steps[0], steps[1:]
+        nxt = lambda: self.run_chain(rest)
+        if step == "terrain":
+            self.do_terrain(skip=True, then=nxt)
+        elif step == "contours":
+            self.do_contours(then=nxt)
+        elif step == "osm":
+            self.do_osm(skip=True, then=nxt)
+
+    def do_terrain(self, skip=False, then=None):
         act = self.need_activity()
         if not act:
             return
         m, z, s = self.num(self.t_margin, "Margines", float, 0), self.num(self.t_zoom, "Poziom kafelków", int, 8), self.num(self.t_step, "Oczko", float, 2)
         if None in (m, z, s):
             return
-        if not messagebox.askyesno("Połączenie z internetem", NET_INFO["teren"] + "\n\nKontynuować?"):
+        if not skip and not messagebox.askyesno("Połączenie z internetem", NET_INFO["teren"] + "\n\nKontynuować?"):
             return
         self.run_job("Pobieranie terenu", [python_exe(), self.tool("hrf_terrain_fetch.py"), act, self.pfile("hrf_terrain.json"),
                                            "--margin", "%g" % m, "--zoom", str(z), "--step", "%g" % s, "--yes"],
-                     after=lambda: self.nb.select(self.tabs["warstwice"]))
+                     after=then or (lambda: self.nb.select(self.tabs["warstwice"])))
 
     def contours_args(self, terrain, out, minor, major, width, png, pdf, svg):
         a = ["--minor", "%g" % minor, "--major", "%g" % major, "--png-width", str(width if png else 0)]
@@ -836,7 +1060,7 @@ class App:
         if n:
             self.logw("Poprzednie pliki zachowano jako *.bak (%d)." % n)
 
-    def do_contours(self):
+    def do_contours(self, then=None):
         terrain = self.pfile("hrf_terrain.json")
         if not terrain or not os.path.isfile(terrain):
             messagebox.showwarning("Brak terenu", "Najpierw pobierz teren (zakładka 2. Teren).")
@@ -852,7 +1076,7 @@ class App:
             return
         base = self.pfile("hrf_contours")
         self.backup(base, [".png", ".pdf", ".svg", ".meta.json"])
-        self.run_job("Warstwice całego terenu", self.contours_args(terrain, base, mi, ma, w, self.c_png.get(), self.c_pdf.get(), self.c_svg.get()))
+        self.run_job("Warstwice całego terenu", self.contours_args(terrain, base, mi, ma, w, self.c_png.get(), self.c_pdf.get(), self.c_svg.get()), after=then)
 
     def do_local(self):
         try:
@@ -886,14 +1110,14 @@ class App:
         args.append("--yes")
         self.run_job("Tekstura lokalna wycinka", args)
 
-    def do_osm(self):
+    def do_osm(self, skip=False, then=None):
         act = self.need_activity()
         if not act:
             return
         r, c, t = self.num(self.o_radius, "Promień", int, 20), self.num(self.o_chunk, "Długość odcinka", float, 500), self.num(self.o_tries, "Liczba prób", int, 1)
         if None in (r, c, t):
             return
-        if not messagebox.askyesno("Połączenie z internetem", NET_INFO["osm"] + "\n\nKontynuować?"):
+        if not skip and not messagebox.askyesno("Połączenie z internetem", NET_INFO["osm"] + "\n\nKontynuować?"):
             return
         args = [python_exe(), self.tool("hrf_osm_fetch.py"), act, self.pfile("hrf_osm.json"), "--radius", str(r), "--chunk", "%g" % c, "--tries", str(t), "--yes"]
         srv = self.o_server.get().strip()
@@ -901,7 +1125,7 @@ class App:
             args += ["--server", srv]
         if self.o_force.get():
             args.append("--force")
-        self.run_job("Pobieranie otoczenia z OSM", args)
+        self.run_job("Pobieranie otoczenia z OSM", args, after=then)
 
     def blender_command(self):
         exe, act = self.blender.get().strip(), self.activity_file()
@@ -935,7 +1159,7 @@ def main():
         pass
     root = tk.Tk()
     app = App(root)
-    root.protocol("WM_DELETE_WINDOW", lambda: (app.save_settings(), root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", app.quit)
     root.mainloop()
 
 
