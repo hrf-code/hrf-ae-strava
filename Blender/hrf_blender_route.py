@@ -581,6 +581,13 @@ def find_contour_texture(p, T):
     return t if t and os.path.isfile(t) else ""
 
 
+def find_streets_texture(p, T):
+    t = bpy.path.abspath(p.streets_texture) if p.streets_texture else ""
+    if not t and T.get("terrain_path"):
+        t = os.path.join(os.path.dirname(os.path.abspath(T["terrain_path"])), "hrf_streets.png")
+    return t if t and os.path.isfile(t) else ""
+
+
 def find_local_texture(p, T):
     """PNG lokalnej tekstury warstwic (hrf_local.png obok danych albo wskazany w panelu) i jego zasięg z .meta.json."""
     png = bpy.path.abspath(p.local_texture) if p.local_texture else ""
@@ -624,14 +631,14 @@ def apply_terrain_style(scene):
     nt = mat.node_tree
     nt.nodes.clear()
     out = nt.nodes.new("ShaderNodeOutputMaterial")
-    if p.terrain_style == "contours":
-        path = find_contour_texture(p, T)
+    if p.terrain_style in ("contours", "streets"):
+        path = find_contour_texture(p, T) if p.terrain_style == "contours" else find_streets_texture(p, T)
         if path:
             tc = nt.nodes.new("ShaderNodeTexCoord")
             tex_g = _image_node(nt, path, "EXTEND")
             nt.links.new(tc.outputs["UV"], tex_g.inputs["Vector"])
             color = tex_g.outputs["Color"]
-            lpath, meta = find_local_texture(p, T) if p.local_use else (None, None)
+            lpath, meta = find_local_texture(p, T) if (p.local_use and p.terrain_style == "contours") else (None, None)
             if lpath:
                 tr = T["terrain"]
                 wg, hg = tr["lng_e"] - tr["lng_w"], tr["lat_n"] - tr["lat_s"]
@@ -673,7 +680,8 @@ def apply_terrain_style(scene):
             nt.links.new(em.outputs[0], out.inputs[0])
             mat.diffuse_color = (0.0, 0.0, 0.0, 1.0)
             return
-        p.info = "Brak PNG warstwic (uruchom tools/hrf_contours.py albo wskaż plik) – teren szary"
+        p.info = ("Brak PNG mapy ulic (uruchom tools/hrf_streetmap.py albo wskaż plik) – teren szary" if p.terrain_style == "streets"
+                  else "Brak PNG warstwic (uruchom tools/hrf_contours.py albo wskaż plik) – teren szary")
     bsdf = nt.nodes.new("ShaderNodeBsdfDiffuse")
     c = p.terrain_color
     bsdf.inputs["Color"].default_value = (c[0], c[1], c[2], 1.0)
@@ -878,6 +886,44 @@ def start_global_generation(scene, out=None):
     ok = "Gotowe – tekstura globalna wczytana." + (" Poprzednie pliki: *.bak." if saved else "")
     _start_job(scene, [_python_exe(), tool, STATE["T"]["terrain_path"], out] + args, _log_path(out), "global_status", ok,
                "Generuję teksturę globalną...")
+    return _log_path(out)
+
+
+def streets_command(scene, python=None, out=None):
+    """Komenda generatora mapy ulic (hrf_streetmap.py) dla całego terenu z ustawień panelu."""
+    T = STATE["T"]
+    p = scene.hrf
+    if not T or not T.get("terrain_path"):
+        raise RuntimeError("Brak pliku terenu – zbuduj scenę z terenem.")
+    layers = [k for k, on in (("roads", p.st_roads), ("cycleways", p.st_cycle), ("streets", p.st_small), ("rivers", p.st_rivers),
+                              ("water", p.st_water), ("boundaries", p.st_bound)) if on]
+    if not layers:
+        raise RuntimeError("Zaznacz co najmniej jedną warstwę mapy ulic.")
+    if not p.streets_save_png and not p.streets_save_vector:
+        raise RuntimeError("Zaznacz co najmniej jedno: Zapisz PNG albo Zapisz PDF/SVG.")
+    here = script_dirs()[0] if script_dirs() else os.getcwd()
+    tool = os.path.normpath(os.path.join(here, "..", "tools", "hrf_streetmap.py"))
+    out = out or os.path.join(os.path.dirname(os.path.abspath(T["path"])), "hrf_streets")
+    exe = python or ("py" if os.name == "nt" else "python3")
+    quote = (lambda x: '"%s"' % x) if " " in exe else (lambda x: x)
+    args = ["--layers", ",".join(layers), "--png-width", str(p.streets_width if p.streets_save_png else 0)]
+    if not p.streets_save_vector:
+        args += ["--no-pdf", "--no-svg"]
+    args.append("--yes")
+    cmd = '%s "%s" "%s" "%s" %s' % (quote(exe), tool, T["terrain_path"], out, " ".join(args))
+    return cmd, (tool, out, args)
+
+
+def start_streets_generation(scene, out=None):
+    cmd, (tool, out, args) = streets_command(scene, out=out)
+    if not os.path.isfile(tool):
+        raise RuntimeError("Nie znaleziono narzędzia: " + tool)
+    if LOCAL["proc"] is not None and LOCAL["proc"].poll() is None:
+        raise RuntimeError("Generator już działa – poczekaj na koniec.")
+    saved = _backup_existing(out, [".png", ".pdf", ".svg", ".meta.json"])
+    ok = "Gotowe – mapa ulic zapisana." + (" Poprzednie pliki: *.bak." if saved else "")
+    _start_job(scene, [_python_exe(), tool, STATE["T"]["terrain_path"], out] + args, _log_path(out), "streets_status", ok,
+               "Generuję mapę ulic (pobieranie z internetu)...")
     return _log_path(out)
 
 
@@ -1265,6 +1311,7 @@ def build_scene(scene):
     col.objects.link(rig)
     o["pivot"], o["rig"] = pivot, rig
     STATE["exag_built"] = cfg["EXAG"]
+    scene["hrf_exag_built"] = cfg["EXAG"]
     STATE["objs"], STATE["T"] = o, T
     apply_look(scene)
     apply_sun(scene)
@@ -1274,6 +1321,7 @@ def build_scene(scene):
     setup_camera(scene)
     t0, speed, nf, fps = time_map(cfg, T)
     engine = apply_render_settings(scene, cfg, nf)
+    replace_nulls(scene)
     scene.frame_set(1)
     info = {"data": T["path"], "name": T["name"], "length_km": round(T["length_m"] / 1000.0, 2),
             "curve_points": len(T["pts"]), "frames": nf, "fps": fps, "mode": cfg["MODE"], "cam": cfg["CAM_MODE"],
@@ -1299,6 +1347,126 @@ def apply_time_camera(scene):
     scene.frame_set(1)
     scene.hrf.info = "%d klatek | %.1f km" % (nf, T["length_m"] / 1000.0)
     return nf
+
+
+# ---------------------------------------------------------------- nulle w podanych współrzędnych
+def parse_coords(text):
+    """„49.5791, 20.0501” = szerokość, długość geograficzna (jak w Mapach Google); opcjonalna trzecia liczba to wysokość m n.p.m.
+    Przecinek dziesiętny też działa („49,5791 20,0501”)."""
+    t = (text or "").replace(";", " ").replace("\u00b0", " ")
+    if "." not in t:
+        t = re.sub(r"(\d),(\d)", r"\1.\2", t)
+    nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", t)]
+    if len(nums) < 2:
+        raise RuntimeError("Podaj współrzędne jako: szerokość, długość (np. 49.5791, 20.0501) – opcjonalnie trzecia liczba to wysokość m n.p.m.")
+    lat, lng = nums[0], nums[1]
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
+        raise RuntimeError("Współrzędne poza zakresem: kolejność to szerokość (−90..90), potem długość (−180..180).")
+    return lat, lng, (nums[2] if len(nums) > 2 else None)
+
+
+def coords_to_xyz(lat, lng, alt=None):
+    """Pozycja w scenie dla współrzędnych geograficznych; wysokość z terenu (albo z podanej wysokości n.p.m., albo z najbliższego punktu trasy)."""
+    T = STATE["T"]
+    if not T:
+        raise RuntimeError("Scena nie jest zbudowana – kliknij 'Przebuduj scenę'.")
+    lat0, lng0, kx, ky = T["proj"]
+    exag = STATE.get("exag_built") or 1.0
+    x, y = (lng - lng0) * kx, (lat - lat0) * ky
+    note = ""
+    tr = T["terrain"]
+    if alt is not None:
+        z = (alt - T["zmin_ref"]) * exag
+    elif tr:
+        z = (terrain_at(tr, lat, lng) - T["zmin_ref"]) * exag
+        if not (tr["lat_s"] <= lat <= tr["lat_n"] and tr["lng_w"] <= lng <= tr["lng_e"]):
+            note = " (poza pobranym terenem – wysokość z jego brzegu)"
+    else:
+        i = min(range(T["n"]), key=lambda k: (T["x"][k] - x) ** 2 + (T["y"][k] - y) ** 2)
+        z, note = T["z"][i], " (brak terenu – wysokość z najbliższego punktu trasy)"
+    return x, y, z, note
+
+
+def _null_collection(scene):
+    col = bpy.data.collections.get("HRF_Nulls")
+    if col is None:
+        col = bpy.data.collections.new("HRF_Nulls")
+    if col.name not in scene.collection.children:
+        scene.collection.children.link(col)
+    return col
+
+
+def add_null(scene, text, name="HRF_Null", to_pivot=False):
+    """Dodaje null (Empty) w podanych współrzędnych albo przenosi tam HRF_Pivot (cel orbity)."""
+    lat, lng, alt = parse_coords(text)
+    x, y, z, note = coords_to_xyz(lat, lng, alt)
+    if to_pivot:
+        pv = STATE["objs"].get("pivot")
+        if pv is None:
+            raise RuntimeError("Scena nie jest zbudowana – kliknij 'Przebuduj scenę'.")
+        pv.hide_viewport = False
+        pv.location = (x, y, z)
+        return "HRF_Pivot przeniesiony na %.5f, %.5f%s" % (lat, lng, note)
+    E = STATE["T"]["ext"]
+    ob = bpy.data.objects.new(name or "HRF_Null", None)
+    ob.empty_display_type = "PLAIN_AXES"
+    ob.empty_display_size = max(5.0, 0.01 * max(E["w"], E["h"]))
+    ob["hrf_lat"], ob["hrf_lng"] = lat, lng
+    if alt is not None:
+        ob["hrf_alt"] = alt
+    ob.location = (x, y, z)
+    _null_collection(scene).objects.link(ob)
+    for o in bpy.context.view_layer.objects:
+        o.select_set(False)
+    ob.select_set(True)
+    bpy.context.view_layer.objects.active = ob
+    return "Dodano null „%s” w %.5f, %.5f%s" % (ob.name, lat, lng, note)
+
+
+def replace_nulls(scene):
+    """Po przebudowie sceny nulle wracają na swoje współrzędne (zmienia się np. przewyższenie, więc wysokość trzeba policzyć od nowa)."""
+    col = bpy.data.collections.get("HRF_Nulls")
+    if not col or not STATE["T"]:
+        return
+    for ob in col.objects:
+        if "hrf_lat" in ob:
+            try:
+                x, y, z, _ = coords_to_xyz(ob["hrf_lat"], ob["hrf_lng"], ob.get("hrf_alt"))
+                ob.location = (x, y, z)
+            except Exception:
+                traceback.print_exc()
+
+
+def _bridge_timer():
+    """Odbiera polecenia z programu HRF.pyw (plik cache/hrf_commands.json obok danych) i odpowiada plikiem hrf_commands.ack."""
+    try:
+        T = STATE["T"]
+        if T and STATE["objs"]:
+            d = os.path.join(os.path.dirname(os.path.abspath(T["path"])), "cache")
+            f = os.path.join(d, "hrf_commands.json")
+            if os.path.isfile(f):
+                with open(f, encoding="utf-8") as fh:
+                    cmds = json.load(fh)
+                os.remove(f)
+                if isinstance(cmds, dict):
+                    cmds = [cmds]
+                acks = []
+                for c in cmds:
+                    try:
+                        if c.get("cmd") not in ("null", "pivot"):
+                            raise RuntimeError("Nieznane polecenie: %s" % c.get("cmd"))
+                        msg = add_null(bpy.context.scene, c.get("text", ""), c.get("name") or "HRF_Null", to_pivot=(c["cmd"] == "pivot"))
+                        acks.append({"id": c.get("id"), "ok": True, "msg": msg})
+                    except Exception as e:
+                        traceback.print_exc()
+                        acks.append({"id": c.get("id"), "ok": False, "msg": str(e)})
+                with open(os.path.join(d, "hrf_commands.ack"), "w", encoding="utf-8") as fh:
+                    json.dump(acks, fh, ensure_ascii=False)
+                for area in bpy.context.window_manager.windows[0].screen.areas:
+                    area.tag_redraw()
+    except Exception:
+        traceback.print_exc()
+    return 1.0
 
 
 # ---------------------------------------------------------------- panel (właściwości, operatory, UI)
@@ -1480,9 +1648,24 @@ class HRFProps(bpy.types.PropertyGroup):
                                      default=(1.0, 0.38, 0.05), update=_upd_colors)
     terrain_style: EnumProperty(name="Styl terenu", default="gray", update=_upd_terrain_style, items=[
         ("gray", "Gładki (oświetlony)", "Szary teren z cieniowaniem"),
-        ("contours", "Warstwice (tekstura)", "Czarne tło, białe warstwice z pliku PNG (tools/hrf_contours.py)")])
+        ("contours", "Warstwice (tekstura)", "Czarne tło, białe warstwice z pliku PNG (tools/hrf_contours.py)"),
+        ("streets", "Mapa ulic (tekstura)", "Czarne tło, białe kontury ulic, rzek, wody i granic miasta z pliku PNG (tools/hrf_streetmap.py)")])
     terrain_texture: StringProperty(name="PNG warstwic", subtype="FILE_PATH", default="", update=_upd_terrain_style,
                                     description="Puste = hrf_contours.png obok pliku terenu; po edycji w Illustratorze wyeksportuj PNG o tych samych proporcjach")
+    streets_width: IntProperty(name="PNG szerokość (px)", default=4096, min=512, max=16384,
+                               description="Szerokość PNG mapy ulic w pikselach (metry na piksel = szerokość obszaru / ta wartość; 8192 = ostrzejsze cienkie linie, ale dłużej)")
+    st_roads: BoolProperty(name="Główne drogi", default=True, description="Autostrady, drogi krajowe, wojewódzkie, powiatowe i trzeciorzędne")
+    st_cycle: BoolProperty(name="Ścieżki rowerowe", default=True)
+    st_small: BoolProperty(name="Drobne uliczki", default=False, description="Ulice osiedlowe, boczne i serwisowe – bardzo dużo linii")
+    st_rivers: BoolProperty(name="Rzeki", default=True)
+    st_water: BoolProperty(name="Jeziora (obrys)", default=True)
+    st_bound: BoolProperty(name="Granice miasta", default=True)
+    streets_save_png: BoolProperty(name="Zapisz PNG", default=True)
+    streets_save_vector: BoolProperty(name="Zapisz PDF/SVG", default=False, description="Zapisuje też wektorowy PDF i SVG mapy ulic do edycji")
+    streets_cmd: StringProperty(name="Komenda mapy ulic", default="")
+    streets_status: StringProperty(name="Stan mapy ulic", default="")
+    streets_texture: StringProperty(name="PNG mapy ulic", subtype="FILE_PATH", default="", update=_upd_terrain_style,
+                                    description="Puste = hrf_streets.png obok pliku terenu (tools/hrf_streetmap.py)")
     local_use: BoolProperty(name="Użyj tekstury lokalnej", default=True, update=_upd_terrain_style,
                             description="Nakłada hrf_local.png (wycinek w wysokiej jakości) na globalną teksturę warstwic")
     local_margin: FloatProperty(name="Margines wycinka (m)", default=1500.0, min=50.0, soft_max=10000.0,
@@ -1514,6 +1697,10 @@ class HRFProps(bpy.types.PropertyGroup):
     own_world: BoolProperty(name="Zostaw moje środowisko (World)", default=True,
                             description="Włączone: skrypt nie zmienia środowiska (World) sceny, zostaje Twoje. Wyłączone: ustawia własne, jasne tło "
                                         "(działa po „Przebuduj scenę”). Siła słońca 0 wyłącza też słońce HRF")
+    null_coords: StringProperty(name="Współrzędne", default="",
+                                description="Szerokość, długość geograficzna jak w Mapach Google, np. 49.5791, 20.0501. Trzecia liczba (opcjonalnie) = wysokość m n.p.m.; "
+                                            "bez niej null leży na terenie")
+    null_name: StringProperty(name="Nazwa nulla", default="HRF_Null")
     output_dir: StringProperty(name="Folder renderu", subtype="DIR_PATH", default="",
                                description="PNG z przezroczystością; puste = folder hrf_render obok pliku .blend")
 
@@ -1598,6 +1785,26 @@ class HRF_OT_center_pivot(bpy.types.Operator):
         return _run_op(self, go, "Null przywrócony na środek trasy")
 
 
+class HRF_OT_add_null(bpy.types.Operator):
+    bl_idname = "hrf.add_null"
+    bl_label = "Dodaj null"
+    bl_description = ("Dodaje null (Empty) w podanych współrzędnych, na wysokości terenu. Leży w kolekcji HRF_Nulls i po 'Przebuduj scenę' wraca na te współrzędne")
+
+    def execute(self, context):
+        p = context.scene.hrf
+        return _run_op(self, lambda: add_null(context.scene, p.null_coords, p.null_name), lambda m: m)
+
+
+class HRF_OT_pivot_to_coords(bpy.types.Operator):
+    bl_idname = "hrf.pivot_to_coords"
+    bl_label = "Pivot tutaj"
+    bl_description = "Przenosi HRF_Pivot (cel orbity kamery) na podane współrzędne"
+
+    def execute(self, context):
+        p = context.scene.hrf
+        return _run_op(self, lambda: add_null(context.scene, p.null_coords, p.null_name, to_pivot=True), lambda m: m)
+
+
 class HRF_OT_local_command(bpy.types.Operator):
     bl_idname = "hrf.local_command"
     bl_label = "Kopiuj komendę (wycinek)"
@@ -1644,6 +1851,29 @@ class HRF_OT_global_run(bpy.types.Operator):
 
     def execute(self, context):
         return _run_op(self, lambda: start_global_generation(context.scene), lambda log: "Uruchomiono generator (log: %s)" % log)
+
+
+class HRF_OT_streets_command(bpy.types.Operator):
+    bl_idname = "hrf.streets_command"
+    bl_label = "Kopiuj komendę (mapa ulic)"
+    bl_description = "Kopiuje do schowka komendę generatora mapy ulic (wklej w terminalu)"
+
+    def execute(self, context):
+        def go():
+            cmd, _ = streets_command(context.scene)
+            context.scene.hrf.streets_cmd = cmd
+            context.window_manager.clipboard = cmd
+        return _run_op(self, go, "Komenda w schowku")
+
+
+class HRF_OT_streets_run(bpy.types.Operator):
+    bl_idname = "hrf.streets_run"
+    bl_label = "Wygeneruj teraz (mapa ulic)"
+    bl_description = ("Pobiera z OpenStreetMap (internet) drogi, rzeki, wodę i granice dla obszaru terenu i rysuje hrf_streets.* w tle; "
+                      "do serwera trafiają tylko rogi prostokątów obszaru, nie trasa. Istniejące pliki dostają kopię .bak")
+
+    def execute(self, context):
+        return _run_op(self, lambda: start_streets_generation(context.scene), lambda log: "Uruchomiono generator (log: %s)" % log)
 
 
 class HRF_OT_reload_texture(bpy.types.Operator):
@@ -1800,6 +2030,32 @@ class HRF_PT_terrain(_Sub, bpy.types.Panel):
             lay.prop(p, "drape")
             lay.prop(p, "terrain_skip")
             lay.prop(p, "terrain_style")
+            if p.terrain_style == "streets":
+                lay.prop(p, "streets_texture")
+                lay.operator("hrf.reload_texture", icon="FILE_REFRESH")
+                sb = lay.box()
+                sb.label(text="Mapa ulic (cały teren, internet)", icon="WORLD")
+                col2 = sb.column(align=True)
+                row = col2.row(align=True)
+                row.prop(p, "st_roads")
+                row.prop(p, "st_cycle")
+                row = col2.row(align=True)
+                row.prop(p, "st_rivers")
+                row.prop(p, "st_water")
+                row = col2.row(align=True)
+                row.prop(p, "st_bound")
+                row.prop(p, "st_small")
+                sb.prop(p, "streets_width")
+                row = sb.row(align=True)
+                row.prop(p, "streets_save_png")
+                row.prop(p, "streets_save_vector")
+                row = sb.row(align=True)
+                row.operator("hrf.streets_command", icon="COPYDOWN")
+                row.operator("hrf.streets_run", icon="PLAY")
+                if p.streets_cmd:
+                    sb.prop(p, "streets_cmd", text="")
+                if p.streets_status:
+                    sb.label(text=p.streets_status)
             if p.terrain_style == "contours":
                 lay.prop(p, "terrain_texture")
                 lay.operator("hrf.reload_texture", icon="FILE_REFRESH")
@@ -1837,6 +2093,21 @@ class HRF_PT_terrain(_Sub, bpy.types.Panel):
         lay.operator("hrf.rebuild", icon="FILE_REFRESH")
 
 
+class HRF_PT_nulls(_Sub, bpy.types.Panel):
+    bl_label = "Null w współrzędnych"
+    bl_idname = "HRF_PT_nulls"
+
+    def draw(self, context):
+        p = context.scene.hrf
+        lay = self.layout
+        lay.prop(p, "null_coords", text="")
+        lay.prop(p, "null_name", text="Nazwa")
+        row = lay.row(align=True)
+        row.operator("hrf.add_null", icon="EMPTY_AXIS")
+        row.operator("hrf.pivot_to_coords", icon="PIVOT_BOUNDBOX")
+        lay.label(text="np. 49.5791, 20.0501  (+ ewent. wysokość m)")
+
+
 class HRF_PT_render(_Sub, bpy.types.Panel):
     bl_label = "Render"
     bl_idname = "HRF_PT_render"
@@ -1849,9 +2120,9 @@ class HRF_PT_render(_Sub, bpy.types.Panel):
         lay.operator("hrf.render_anim", icon="RENDER_ANIMATION")
 
 
-CLASSES = [HRFProps, HRF_OT_rebuild, HRF_OT_apply, HRF_OT_set_speed, HRF_OT_select_pivot, HRF_OT_center_pivot,
-           HRF_OT_local_command, HRF_OT_local_run, HRF_OT_global_command, HRF_OT_global_run, HRF_OT_reload_texture, HRF_OT_render_frame, HRF_OT_render_anim,
-           HRF_PT_main, HRF_PT_time, HRF_PT_camera, HRF_PT_look, HRF_PT_terrain, HRF_PT_render]
+CLASSES = [HRFProps, HRF_OT_rebuild, HRF_OT_apply, HRF_OT_set_speed, HRF_OT_select_pivot, HRF_OT_center_pivot, HRF_OT_add_null, HRF_OT_pivot_to_coords,
+           HRF_OT_local_command, HRF_OT_local_run, HRF_OT_global_command, HRF_OT_global_run, HRF_OT_streets_command, HRF_OT_streets_run, HRF_OT_reload_texture, HRF_OT_render_frame, HRF_OT_render_anim,
+           HRF_PT_main, HRF_PT_time, HRF_PT_camera, HRF_PT_look, HRF_PT_terrain, HRF_PT_nulls, HRF_PT_render]
 
 
 def unregister():
@@ -1876,6 +2147,14 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.hrf = PointerProperty(type=HRFProps)
+    old = bpy.app.driver_namespace.get("hrf_bridge_timer")
+    if old is not None:
+        try:
+            bpy.app.timers.unregister(old)
+        except Exception:
+            pass
+    bpy.app.driver_namespace["hrf_bridge_timer"] = _bridge_timer
+    bpy.app.timers.register(_bridge_timer, first_interval=1.0, persistent=True)
 
 
 def show_sidebar():
@@ -1902,6 +2181,42 @@ def run(overrides=None):
     finally:
         STATE["busy"] = False
     return build_scene(scene)
+
+
+def attach(scene=None):
+    """Podłącza panel HRF i most z programem HRF.pyw do sceny, która już jest zbudowana (otwarty zapisany .blend), BEZ przebudowy obiektów.
+    Odtwarza z pliku danych tylko obliczenia (trasa, teren), a obiekty bierze ze sceny po nazwach."""
+    scene = scene or bpy.context.scene
+    register()
+    show_sidebar()
+    names = {"route": "HRF_Route", "done": "HRF_RouteDone", "arrow": "HRF_Arrow", "cam": "HRF_Camera", "pivot": "HRF_Pivot",
+             "rig": "HRF_Rig", "terrain": "HRF_Terrain", "sun": "HRF_Sun"}
+    objs = {k: bpy.data.objects.get(v) for k, v in names.items()}
+    objs = {k: v for k, v in objs.items() if v is not None}
+    if "route" not in objs:
+        raise RuntimeError("To nie jest scena HRF (brak obiektu HRF_Route) – uruchom skrypt bez HRF_ATTACH, żeby ją zbudować.")
+    STATE["busy"] = True
+    try:
+        cfg = cfg_from_props(scene)
+        env_data = os.environ.get("HRF_DATA", "")
+        dp = bpy.path.abspath(scene.hrf.data_path) if scene.hrf.data_path else ""
+        if not (dp and os.path.isfile(dp)) and env_data and os.path.isfile(env_data):
+            cfg["DATA_PATH"] = env_data
+        T = build_track(cfg, load_raw(cfg))
+    finally:
+        STATE["busy"] = False
+    STATE["objs"], STATE["T"] = objs, T
+    STATE["exag_built"] = scene.get("hrf_exag_built", cfg["EXAG"])
+    print("[HRF] Dołączono do istniejącej sceny (bez przebudowy). Dane: %s" % T["path"])
+    return T
+
+
+def _attach_on_load():
+    try:
+        attach(bpy.context.scene)
+    except Exception:
+        traceback.print_exc()
+    return None
 
 
 # ---------------------------------------------------------------- uruchomienie z wiersza poleceń
@@ -1932,7 +2247,9 @@ def _cli():
     return ov, extra
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and os.environ.get("HRF_ATTACH") == "1" and bpy.data.filepath and bpy.data.objects.get("HRF_Route"):
+    attach(bpy.context.scene)
+elif __name__ == "__main__":
     ov, extra = _cli() if "--" in sys.argv else ({}, {})
     run(ov)
     if "--dark" in extra:
@@ -1954,3 +2271,7 @@ if __name__ == "__main__":
         bpy.ops.render.render(write_still=True)
     if "--save" in extra:
         bpy.ops.wm.save_as_mainfile(filepath=extra["--save"][0])
+
+if __name__ != "__main__" and bpy.data.filepath and bpy.data.objects.get("HRF_Route"):
+    # skrypt z zaznaczonym „Register” wczytany razem z zapisanym .blend: panel i most wracają bez przebudowy sceny
+    bpy.app.timers.register(_attach_on_load, first_interval=0.5)

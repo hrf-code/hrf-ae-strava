@@ -11,10 +11,10 @@ Nakładka danych (prędkość, tętno, wysokość, mapa, mini mapa 3D, profil…
 
 ## Najszybciej: program z oknem (`HRF.pyw`)
 `py HRF.pyw` (albo dwuklik) otwiera jedno okno ze wszystkimi narzędziami w zakładkach w kolejności pracy: **Dane** (FIT/GPX → JSON),
-**Teren**, **Warstwice**, **Wycinek lokalny**, **OSM**, **Blender** (uruchamia scenę dla wybranego projektu), **After Effects**
+**Teren**, **Warstwice**, **Mapa ulic**, **Wycinek lokalny**, **OSM**, **Blender** (uruchamia scenę dla wybranego projektu), **After Effects**
 (instrukcja i ścieżki). U góry wybierasz projekt (podfolder `data/` albo dowolny folder z dysku), pasek pokazuje, których plików jeszcze brakuje.
 **Nowy projekt…** (menu Plik albo przycisk u góry): wskazujesz plik FIT/GPX i folder projektu (dowolny, nowy lub istniejący), a program sam
-kopiuje plik do `zrodlo/`, konwertuje go i – wedle zaznaczenia – pobiera teren, rysuje warstwice i (opcjonalnie) pobiera OSM, wszystko w tym folderze.
+kopiuje plik do `zrodlo/`, konwertuje go i – wedle zaznaczenia – pobiera teren, rysuje warstwice i mapę ulic oraz (opcjonalnie) pobiera OSM, wszystko w tym folderze.
 Najedź myszą na dowolne pole lub przycisk – pojawia się podpowiedź, co dokładnie robi. Wynik narzędzi, postęp i błędy są w dolnym
 logu, przycisk **Anuluj zadanie** przerywa pracę w dowolnej chwili (pobrane dane zostają w `cache/`). Przed każdym połączeniem
 z internetem okno mówi, co zostanie wysłane. Program tylko uruchamia skrypty z `tools/` – to te same komendy, które opisano niżej
@@ -58,6 +58,14 @@ w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym 
   „N klatek = X s | prędkość | okno od–do min”. Zmiana czasu przelicza animację sama po ok. 0,7 s. Limit 36000 klatek (20 min
   przy 30 fps): np. cała 4-godzinna jazda w 1:1 to ponad 400 tys. klatek, więc zwiększ przyspieszenie lub zawęź okno.
 - `EXAG` – przewyższenie terenu i trasy (1 = skala rzeczywista, domyślnie 1,5 = czytelne i naturalne, 3 = mocno przesadzone).
+- **Null w podanych współrzędnych:** panel HRF → „Null w współrzędnych”: wpisz `49.5791, 20.0501` (szerokość, długość jak w Mapach Google;
+  opcjonalnie trzecia liczba = wysokość m n.p.m.) i „Dodaj null” – Empty pojawia się w tym miejscu na powierzchni terenu (kolekcja `HRF_Nulls`,
+  po „Przebuduj scenę” wraca na swoje współrzędne). „Pivot tutaj” przenosi `HRF_Pivot` (cel orbity). To samo można zrobić z okna `HRF.pyw`
+  (zakładka Blender → „Null w Blenderze”): okno przekazuje współrzędne uruchomionemu Blenderowi z załadowaną sceną tego samego projektu
+  (przez plik `cache/hrf_commands.json`, Blender odpowiada w logu okna).
+  **Zapisana scena:** przycisk „Otwórz zapisaną scenę (.blend)…” (zakładka Blender, menu Plik) otwiera Twój plik `.blend` i tylko *podłącza* panel HRF
+  i odbiór poleceń (`HRF_ATTACH=1`), bez przebudowy – ustawienia, klatki kluczowe i ręcznie przesunięte obiekty zostają, a null można dodać
+  jak wyżej. To samo dzieje się po otwarciu pliku `.blend`, w którym skrypt ma zaznaczone „Register” (bez przebudowy). Zwykłe „Run Script” nadal buduje scenę od nowa.
 - **Środowisko (World):** domyślnie skrypt go nie rusza – zostaje Twoje (np. standardowe z pliku startowego Blendera). Dotyczy to też
   sceny z terenem; własny jasny World powstaje tylko, gdy scena nie ma żadnego albo wyłączysz „Zostaw moje środowisko (World)”
   w panelu (Wygląd) / `OWN_WORLD = False` w `CONFIG` (po „Przebuduj scenę”). Słońce HRF jest osobno: siła 0 je wyłącza.
@@ -71,6 +79,13 @@ w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym 
   oraz `.png` (tekstura). Edytujesz PDF/SVG (Illustrator, Inkscape), eksportujesz PNG **o tych samych proporcjach
   i planszy**, a w panelu Blendera wybierasz Styl terenu → „Warstwice (tekstura)” i wskazujesz PNG („Wczytaj teksturę ponownie”
   po każdej zmianie). Blender nie wczytuje PDF jako obrazu – dlatego PNG. Opcje: `--minor 25 --major 100 --png-width 4096`.
+- **Mapa ulic (osobne pliki od warstwic):** `py tools/hrf_streetmap.py data/<projekt>/hrf_terrain.json data/<projekt>/hrf_streets` pobiera z OpenStreetMap
+  (po prostokątach obszaru terenu – do Overpass trafiają tylko rogi prostokątów, nie trasa) tylko **główne arterie** (autostrady … drogi trzeciorzędne) i **ścieżki rowerowe**, rzeki, jeziora
+  (same obrysy) i granice miasta/gminy i rysuje je jako czarno-białe **kontury** (linie, bez wypełnień) na tej samej planszy co teren:
+  `hrf_streets.png/.pdf/.svg` (+ `.meta.json`; SVG ma grupy `drogi-glowne`, `drogi-drugorzedne`, `rowery`, `rzeki`, `woda`, `granice`). Warstwy: `--layers roads,cycleways,rivers,water,boundaries` (domyślnie); opcjonalnie `streets` (drobne uliczki osiedlowe i boczne),
+  `paths` (chodniki, ścieżki, drogi leśne), `streams` (potoki), `green` (obrysy lasów i parków), poziom granic `--admin-levels 8`, rozmiar prostokąta `--tile-km 10`.
+  Pobieranie jest wznawialne (cache w `cache/hrf_streets/`). W Blenderze: Styl terenu → **Mapa ulic (tekstura)**; tam jest też blok „Mapa ulic (cały teren, internet)” z wyborem warstw, polem szerokości PNG i przyciskiem „Wygeneruj teraz”. Szerokość PNG ustawiasz też w oknie `HRF.pyw` (zakładka 4 oraz okno „Nowy projekt”). Powstaje też automatycznie
+  po utworzeniu projektu w oknie `HRF.pyw` (zakładka „4. Mapa ulic”).
 - **Tekstura lokalna (z bliska):** globalny PNG warstwic ma jedną rozdzielczość na cały teren, więc przy kamerze blisko trasy linie są
   grube i poszarpane. W panelu (Teren → styl „Warstwice” → „Tekstura lokalna”) przycisk **Kopiuj komendę** liczy wycinek z bieżącego
   okna czasu (trasa pokazana w animacji + „Margines wycinka”) i kopiuje do schowka gotową komendę; **Wygeneruj teraz** uruchamia ją
@@ -98,6 +113,7 @@ hrf-ae-strava/
 │  ├─ hrf_osm_fetch.py           # drogi/budynki/woda/zieleń z Overpass API
 │  ├─ hrf_terrain_fetch.py       # wysokości terenu wokół trasy (dla Blendera)
 │  ├─ hrf_contours.py            # warstwice z terenu: PDF/SVG (edycja) + PNG (tekstura)
+│  ├─ hrf_streetmap.py           # ulice, rzeki, woda, granice miasta jako czarno-białe kontury (PNG/PDF/SVG)
 │  └─ hrf_local_texture.py       # wysokości + warstwice tylko dla wycinka (tekstura z bliska)
 ├─ Blender/hrf_blender_route.py   # scena 3D z trasy: wysokość, strzałka, kamera (chase / orbit)
 ├─ archive/                      # starszy skrypt jednorazowy (bez panelu)

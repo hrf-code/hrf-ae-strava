@@ -27,6 +27,8 @@ NET_INFO = {
               "pokrywających obszar trasy. Sama trasa i Twoje dane nie są wysyłane."),
     "wycinek": ("Do serwera kafelków wysokości (s3.amazonaws.com) trafią tylko numery kafelków pokrywających wskazany wycinek. "
                 "Sama trasa nie jest wysyłana."),
+    "ulice": ("Do serwera Overpass (OpenStreetMap) trafią tylko współrzędne rogów prostokątów pokrywających obszar terenu (po kilka km), a nie Twoja trasa. "
+              "Pobierane są drogi, rzeki, woda i granice miasta w tym obszarze; dla dużego terenu to kilkadziesiąt MB danych i kilka minut."),
     "osm": ("Do serwera Overpass (OpenStreetMap) zostaną wysłane współrzędne odcinków Twojej trasy, żeby pobrać drogi, budynki, "
             "wodę i zieleń w pobliżu. To dane o przebiegu trasy – wysyłane są do zewnętrznego serwisu."),
 }
@@ -171,6 +173,7 @@ class App:
             pass
         self.settings = self.load_settings()
         self.extra = [x for x in self.settings.get("extra", []) if isinstance(x, str)]
+        self.blends = dict(self.settings.get("blends", {}))     # projekt -> ostatnio otwarty zapisany .blend
         self.proj_map = {}
         self.build_vars()
         self.build_menu()
@@ -193,7 +196,7 @@ class App:
         try:
             os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
             with open(SETTINGS, "w", encoding="utf-8") as f:
-                json.dump({"project": self.pdir() or "", "extra": self.extra, "blender": self.blender.get()}, f, ensure_ascii=False)
+                json.dump({"project": self.pdir() or "", "extra": self.extra, "blends": self.blends, "blender": self.blender.get()}, f, ensure_ascii=False)
         except Exception:
             pass
 
@@ -212,7 +215,13 @@ class App:
         self.l_png, self.l_vec = tk.BooleanVar(value=True), tk.BooleanVar(value=False)
         self.o_radius, self.o_chunk, self.o_tries, self.o_server = V(value="150"), V(value="3000"), V(value="6"), V(value="domyślne")
         self.o_force = tk.BooleanVar(value=False)
+        B = tk.BooleanVar
+        self.s_roads, self.s_cycle, self.s_small, self.s_paths, self.s_rivers, self.s_streams, self.s_water, self.s_bound = (
+            B(value=True), B(value=True), B(value=False), B(value=False), B(value=True), B(value=False), B(value=True), B(value=True))
+        self.s_tile, self.s_width, self.s_admin = V(value="10"), V(value="4096"), V(value="8")
+        self.s_png, self.s_pdf, self.s_svg = B(value=True), B(value=False), B(value=False)
         self.blender = V()
+        self.null_coords, self.null_name = V(), V(value="HRF_Null")
 
     # ---- rejestracja podpowiedzi
     def tip(self, widget, text):
@@ -264,6 +273,7 @@ class App:
         plik.add_command(label="Otwórz folder data/", command=lambda: self.open_folder(self.data_dir))
         plik.add_separator()
         plik.add_command(label="Uruchom Blendera ze skryptem", accelerator="F5", command=self.do_blender)
+        plik.add_command(label="Otwórz zapisaną scenę (.blend)…", command=self.open_blend)
         plik.add_separator()
         plik.add_command(label="Zakończ", command=self.quit)
         self.root.bind("<F5>", lambda e: self.do_blender())
@@ -322,6 +332,7 @@ class App:
         items = [("act", "Dane aktywności", "Plik <nazwa>_hrf.json z konwertera (zakładka Dane). Potrzebny do wszystkiego poniżej."),
                  ("terrain", "Teren", "hrf_terrain.json – wysokości terenu wokół trasy (zakładka Teren)."),
                  ("cont", "Warstwice (cały teren)", "hrf_contours.png/.pdf/.svg – czarno-biała mapa warstwic (zakładka Warstwice)."),
+                 ("streets", "Mapa ulic", "hrf_streets.png/.pdf/.svg – czarno-białe kontury ulic, rzek, wody i granic miasta (zakładka Mapa ulic)."),
                  ("local", "Wycinek lokalny", "hrf_local.png + hrf_local.meta.json – tekstura w wysokiej jakości dla fragmentu trasy (zakładka Wycinek)."),
                  ("osm", "OSM", "hrf_osm.json – drogi, budynki, woda i zieleń z OpenStreetMap (zakładka OSM, opcjonalne).")]
         for i, (key, text, tip) in enumerate(items):
@@ -336,7 +347,7 @@ class App:
         self.nb.pack(fill="both", expand=True, padx=10, pady=6)
         self.tabs = {}
         for key, title in (("start", "Start"), ("dane", "1. Dane"), ("teren", "2. Teren"), ("warstwice", "3. Warstwice"),
-                           ("wycinek", "4. Wycinek lokalny"), ("osm", "5. OSM"), ("blender", "6. Blender"), ("ae", "7. After Effects"), ("about", "O programie")):
+                           ("ulice", "4. Mapa ulic"), ("wycinek", "5. Wycinek lokalny"), ("osm", "6. OSM"), ("blender", "7. Blender"), ("ae", "8. After Effects"), ("about", "O programie")):
             fr = ttk.Frame(self.nb)
             self.nb.add(fr, text=title)
             self.tabs[key] = fr
@@ -344,6 +355,7 @@ class App:
         self.tab_dane(self.tabs["dane"])
         self.tab_teren(self.tabs["teren"])
         self.tab_warstwice(self.tabs["warstwice"])
+        self.tab_ulice(self.tabs["ulice"])
         self.tab_wycinek(self.tabs["wycinek"])
         self.tab_osm(self.tabs["osm"])
         self.tab_blender(self.tabs["blender"])
@@ -360,17 +372,18 @@ class App:
                     pass
 
     def tab_start(self, f):
-        self.intro(f, "Tak wygląda cały przepływ. Wymagane są kroki 1–3 (dane, teren, warstwice) i 6 (Blender); reszta jest opcjonalna.")
+        self.intro(f, "Tak wygląda cały przepływ. Wymagane są kroki 1–3 (dane, teren, warstwice) i 7 (Blender); reszta jest opcjonalna.")
         txt = ("1. Dane – konwertujesz plik FIT/GPX ze Stravy na plik *_hrf.json (prędkość, tętno, wysokość, trasa…).\n"
                "2. Teren – pobierasz wysokości terenu wokół trasy (internet, kafelki wysokości).\n"
                "3. Warstwice – rysujesz czarno-białą mapę warstwic całego terenu (PNG do Blendera, PDF/SVG do edycji).\n"
-               "4. Wycinek lokalny – gdy kamera jest blisko trasy: tekstura warstwic w wysokiej jakości tylko dla tego fragmentu.\n"
-               "5. OSM – opcjonalnie drogi, budynki, woda i zieleń z OpenStreetMap (do mini mapy w After Effects).\n"
-               "6. Blender – otwiera Blendera z gotową sceną 3D (trasa z wysokością, strzałka, kamera, teren); renderujesz przezroczyste PNG.\n"
-               "7. After Effects – panel z nakładką danych nad wideo (liczniki, mapa, profil); nakładasz też render z Blendera.")
+               "4. Mapa ulic – osobne czarno-białe kontury dróg, rzek, jezior i granic miasta (ta sama plansza, osobne pliki hrf_streets.*).\n"
+               "5. Wycinek lokalny – gdy kamera jest blisko trasy: tekstura warstwic w wysokiej jakości tylko dla tego fragmentu.\n"
+               "6. OSM – opcjonalnie drogi, budynki, woda i zieleń z OpenStreetMap (do mini mapy w After Effects).\n"
+               "7. Blender – otwiera Blendera z gotową sceną 3D (trasa z wysokością, strzałka, kamera, teren); renderujesz przezroczyste PNG.\n"
+               "8. After Effects – panel z nakładką danych nad wideo (liczniki, mapa, profil); nakładasz też render z Blendera.")
         lab = ttk.Label(f, text=txt, justify="left")
         lab.pack(fill="x", padx=14, pady=4)
-        self.intro(f, "Gdzie są pliki: folder projektu (domyślnie data/<projekt>/, ale możesz wskazać dowolny folder na dysku) zawiera <nazwa>_hrf.json, hrf_terrain.json, hrf_contours.(png/pdf/svg), hrf_local.*, "
+        self.intro(f, "Gdzie są pliki: folder projektu (domyślnie data/<projekt>/, ale możesz wskazać dowolny folder na dysku) zawiera <nazwa>_hrf.json, hrf_terrain.json, hrf_contours.(png/pdf/svg), hrf_streets.(png/pdf/svg), hrf_local.*, "
                       "hrf_osm.json, folder zrodlo/ (oryginalny FIT/GPX) i folder cache/ (pobrane kafelki, odcinki OSM, logi). "
                       "Folder data/ jest prywatny i nie trafia do GitHuba; własny folder projektu program tylko zapamiętuje, niczego poza nim nie rusza. Najedź myszą na dowolne pole lub przycisk, żeby zobaczyć podpowiedź.")
 
@@ -458,6 +471,46 @@ class App:
         b.pack(side="left")
         self.tip(b, "Otwiera hrf_contours.svg w domyślnym programie (np. Inkscape).")
 
+    def tab_ulice(self, f):
+        self.intro(f, "Rysuje mapę głównych dróg, ścieżek rowerowych, rzek, jezior i granic miasta jako czarno-białe KONTURY (same linie, bez wypełnień; drogi to linie) na tej samej planszy co teren "
+                      "i warstwice, ale w osobnych plikach (hrf_streets.png/.pdf/.svg). Dane z OpenStreetMap, potrzebny internet. W Blenderze: Styl terenu → Mapa ulic.")
+        box = ttk.LabelFrame(f, text="Co narysować", padding=(10, 4, 10, 6))
+        box.pack(anchor="w", padx=14, pady=4)
+        items = ((self.s_roads, "Główne drogi (arterie)", "Tylko główne arterie: autostrady, drogi ekspresowe, krajowe, wojewódzkie, powiatowe i trzeciorzędne (cieńsze). Bez drobnych uliczek."),
+                 (self.s_cycle, "Ścieżki rowerowe", "Wydzielone drogi i ścieżki rowerowe (oraz ścieżki oznaczone jako rowerowe)."),
+                 (self.s_small, "Drobne uliczki", "Ulice osiedlowe, boczne, serwisowe i dojazdowe – bardzo dużo drobnych linii, dlatego domyślnie wyłączone."),
+                 (self.s_paths, "Ścieżki i drogi leśne", "Chodniki, ścieżki, drogi leśne, szlaki rowerowe i schody (najcieńsze linie). W mieście bardzo dużo danych."),
+                 (self.s_rivers, "Rzeki i kanały", "Cieki wodne rysowane jako linie."),
+                 (self.s_streams, "Potoki", "Małe cieki; w górach jest ich dużo, więc domyślnie wyłączone."),
+                 (self.s_water, "Jeziora i zbiorniki (obrys)", "Same obrysy wody, bez wypełnienia."),
+                 (self.s_bound, "Granice miasta / gminy", "Granice administracyjne (poziom z pola niżej); grubsza linia."))
+        for i, (var, text, tip) in enumerate(items):
+            self.check(box, text, var, tip).grid(row=i // 2, column=i % 2, sticky="w", padx=8, pady=2)
+        g = ttk.Frame(f)
+        g.pack(anchor="w", padx=14, pady=4)
+        self.field(g, 0, "Poziom granic (admin_level):", self.s_admin, "Poziom granic administracyjnych OSM, po przecinku. 8 = gmina/miasto w Polsce (domyślnie), 6 = powiat, 4 = województwo. "
+                   "Np. 8,9 dodaje też dzielnice dużych miast.", width=10)
+        self.field(g, 1, "Bok prostokąta zapytania:", self.s_tile, "Obszar jest pobierany w prostokątach tej wielkości (km). 10 pasuje do terenu i wsi; w gęstym mieście zmniejsz do 5, "
+                   "jeśli serwer przekracza limit czasu.", width=10, unit="km")
+        self.field(g, 2, "Szerokość PNG:", self.s_width, "Piksele (np. 4096). Przy dużym terenie 8192 daje ostrzejsze cienkie ulice, ale dłużej się liczy.", width=10, unit="px")
+        r = ttk.Frame(f)
+        r.pack(anchor="w", padx=14, pady=6)
+        self.check(r, "Zapisz PNG", self.s_png, "Raster, który Blender nakłada na teren.").pack(side="left")
+        self.check(r, "Zapisz PDF", self.s_pdf, "Wektor do edycji (czarne tło + białe ścieżki).").pack(side="left", padx=12)
+        self.check(r, "Zapisz SVG", self.s_svg, "Wektor z nazwanymi grupami (drogi-glowne, drogi-poboczne, rzeki, woda, granice…) – wygodny w edycji.").pack(side="left")
+        r2 = ttk.Frame(f)
+        r2.pack(anchor="w", padx=14, pady=8)
+        b = self.action(r2, "Generuj mapę ulic (internet)", self.do_streets,
+                        "Pobiera z OpenStreetMap wybrane warstwy dla obszaru terenu i rysuje hrf_streets.* w folderze projektu. Wymaga pobranego terenu. "
+                        "Pyta o zgodę; istniejące pliki dostają kopię .bak. Przerwane pobieranie wznawia się z pamięci podręcznej.")
+        b.pack(side="left")
+        b = ttk.Button(r2, text="Otwórz PDF", command=lambda: self.open_project_file("hrf_streets.pdf"))
+        b.pack(side="left", padx=8)
+        self.tip(b, "Otwiera hrf_streets.pdf w domyślnym programie (np. Illustrator).")
+        b = ttk.Button(r2, text="Otwórz SVG", command=lambda: self.open_project_file("hrf_streets.svg"))
+        b.pack(side="left")
+        self.tip(b, "Otwiera hrf_streets.svg w domyślnym programie (np. Inkscape).")
+
     def tab_wycinek(self, f):
         self.intro(f, "Tekstura warstwic w wysokiej jakości tylko dla fragmentu trasy (kamera blisko). Pobiera drobniejsze wysokości dla wycinka i rysuje "
                       "gładkie warstwice. Potrzebny internet. Najłatwiej: w Blenderze (panel HRF → Teren) kliknij ‘Kopiuj komendę’ i wklej tu.")
@@ -521,7 +574,25 @@ class App:
         self.tip(b, "Startuje Blendera i buduje scenę z pliku *_hrf.json wybranego projektu (a teren, warstwice i OSM bierze z folderu projektu). "
                     "Blender otwiera się w osobnym oknie. Działa w każdej chwili, także podczas pobierania danych; to samo robi przycisk u góry okna, "
                     "wpis w menu Plik i klawisz F5.")
-        b.pack(anchor="w", padx=14, pady=6)
+        b.pack(anchor="w", padx=14, pady=(6, 2))
+        b = ttk.Button(f, text="Otwórz zapisaną scenę (.blend)…", command=self.open_blend)
+        self.tip(b, "Otwiera w Blenderze Twój zapisany plik .blend z wcześniej zbudowaną sceną tego projektu – BEZ jej przebudowy (wszystkie ustawienia, klatki kluczowe "
+                    "i ręcznie ustawione obiekty zostają). Skrypt tylko podłącza panel HRF i odbiór poleceń z tego okna, więc potem można dodawać nulle w podanych współrzędnych.")
+        b.pack(anchor="w", padx=14, pady=(0, 6))
+        nb = ttk.LabelFrame(f, text="Null w Blenderze (gdy scena jest już załadowana)", padding=(10, 6, 10, 8))
+        nb.pack(anchor="w", fill="x", padx=14, pady=(10, 4))
+        self.field(nb, 0, "Współrzędne:", self.null_coords, "Szerokość, długość geograficzna jak w Mapach Google (prawy klik na mapie → pierwsza linijka), np. 49.5791, 20.0501. "
+                   "Trzecia liczba (opcjonalnie) to wysokość m n.p.m., np. 49.5791, 20.0501, 1250. Bez niej null leży na powierzchni terenu.", width=40)
+        self.field(nb, 1, "Nazwa nulla:", self.null_name, "Nazwa obiektu (Empty) w Blenderze. Nulle trafiają do kolekcji HRF_Nulls i po „Przebuduj scenę” wracają na swoje współrzędne.", width=24)
+        r = ttk.Frame(nb)
+        r.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        b = ttk.Button(r, text="Dodaj null w Blenderze", command=lambda: self.send_blender("null"))
+        b.pack(side="left")
+        self.tip(b, "Wysyła współrzędne do uruchomionego Blendera, który ma załadowaną scenę tego projektu (zbudowaną przyciskiem „Uruchom Blendera ze sceną” albo otwartą "
+                    "przyciskiem „Otwórz zapisaną scenę”); tam pojawia się nowy null (Empty) w tym miejscu. Działa w każdej chwili i nie blokuje innych zadań.")
+        b = ttk.Button(r, text="Przenieś pivot (cel orbity) tutaj", command=lambda: self.send_blender("pivot"))
+        b.pack(side="left", padx=8)
+        self.tip(b, "Przenosi istniejący HRF_Pivot, wokół którego orbituje kamera, na podane współrzędne (w trybie celu orbity „null”).")
         b = ttk.Button(f, text="Kopiuj ścieżkę skryptu Blendera", command=lambda: self.copy_text(BLENDER_SCRIPT))
         b.pack(anchor="w", padx=14)
         self.tip(b, "Do ręcznego otwarcia: w Blenderze zakładka Scripting → Open → ten plik → Run Script. Ścieżka do pliku trafia do schowka.")
@@ -687,6 +758,7 @@ class App:
             "act": [self.activity_file()] if self.activity_file() else [],
             "terrain": [self.pfile("hrf_terrain.json")] if d else [],
             "cont": [self.pfile("hrf_contours." + e) for e in ("png", "pdf", "svg")] if d else [],
+            "streets": [self.pfile("hrf_streets." + e) for e in ("png", "pdf", "svg")] if d else [],
             "local": [self.pfile("hrf_local.png")] if d else [],
             "osm": [self.pfile("hrf_osm.json")] if d else [],
         }
@@ -695,7 +767,7 @@ class App:
             if have:
                 size = sum(os.path.getsize(x) for x in have)
                 extra = ""
-                if key == "cont":
+                if key in ("cont", "streets"):
                     extra = " (" + "/".join(os.path.splitext(x)[1][1:].upper() for x in have) + ")"
                 lab.config(text="✔ %s%s: %s" % (text, extra, fmt_size(size)), foreground="#1a7f2e")
             else:
@@ -779,25 +851,43 @@ class App:
                    "Puste = data/<nazwa projektu>/ w folderze programu.", width=54, browse=self.pick_folder)
         self.field(g, 3, "Nazwa projektu:", self.new_name, "Nazwa plików danych (<nazwa>_hrf.json). Domyślnie z nazwy pliku.", width=30)
         ttk.Separator(g, orient="horizontal").grid(row=4, column=0, columnspan=4, sticky="ew", pady=8)
-        ttk.Label(g, text="Po konwersji przygotuj od razu (ustawienia z zakładek 2 i 3):").grid(row=5, column=0, columnspan=4, sticky="w")
-        self.want_terrain, self.want_contours, self.want_osm = tk.BooleanVar(value=True), tk.BooleanVar(value=True), tk.BooleanVar(value=False)
+        ttk.Label(g, text="Po konwersji przygotuj od razu (reszta ustawień z zakładek 2, 3 i 4):").grid(row=5, column=0, columnspan=4, sticky="w")
+        self.want_terrain, self.want_contours, self.want_streets, self.want_osm = tk.BooleanVar(value=True), tk.BooleanVar(value=True), tk.BooleanVar(value=True), tk.BooleanVar(value=False)
         c = self.check(g, "Teren (internet: numery kafelków wysokości)", self.want_terrain, "Pobiera wysokości terenu wokół trasy (zakładka 2. Teren: margines, zoom, oczko). "
                        "Bez tego nie powstanie teren w Blenderze.")
         c.grid(row=6, column=0, columnspan=4, sticky="w", pady=2)
         c = self.check(g, "Warstwice całego terenu (PNG)", self.want_contours, "Rysuje czarno-białą teksturę warstwic (zakładka 3. Warstwice). Wymaga terenu.")
         c.grid(row=7, column=0, columnspan=4, sticky="w", pady=2)
-        c = self.check(g, "Otoczenie z OpenStreetMap (internet, opcjonalne, wolne)", self.want_osm, "Drogi, budynki, woda i zieleń do mini mapy w After Effects. "
-                       "Wysyła współrzędne odcinków trasy do serwera Overpass; może trwać długo – można zrobić później w zakładce 5. OSM.")
+        c = self.check(g, "Mapa ulic, rzek i granic miasta (kontury; internet)", self.want_streets, "Czarno-białe kontury dróg, rzek, jezior i granic miasta na planszy terenu "
+                       "(zakładka 4. Mapa ulic: warstwy i ustawienia). Wymaga terenu. Domyślnie tylko główne drogi i ścieżki rowerowe, bez drobnych uliczek. Dane z OpenStreetMap, wysyłane są tylko rogi prostokątów obszaru, nie trasa.")
         c.grid(row=8, column=0, columnspan=4, sticky="w", pady=2)
+        c = self.check(g, "Otoczenie z OpenStreetMap (internet, opcjonalne, wolne)", self.want_osm, "Drogi, budynki, woda i zieleń do mini mapy w After Effects. "
+                       "Wysyła współrzędne odcinków trasy do serwera Overpass; może trwać długo – można zrobić później w zakładce 6. OSM.")
+        c.grid(row=9, column=0, columnspan=4, sticky="w", pady=2)
+        wr = ttk.Frame(g)
+        wr.grid(row=10, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        l1 = ttk.Label(wr, text="Szerokość PNG:  warstwice")
+        l1.pack(side="left")
+        e1 = ttk.Entry(wr, textvariable=self.c_width, width=7)
+        e1.pack(side="left", padx=(4, 12))
+        l2 = ttk.Label(wr, text="mapa ulic")
+        l2.pack(side="left")
+        e2 = ttk.Entry(wr, textvariable=self.s_width, width=7)
+        e2.pack(side="left", padx=4)
+        ttk.Label(wr, text="px", foreground="#666").pack(side="left")
+        wtip = ("Szerokość obrazu PNG w pikselach (np. 4096; 8192 = ostrzejsze linie, ale dłużej się liczy i zajmuje więcej pamięci). Metry na piksel = szerokość "
+                "obszaru / ta liczba. Wysokość wynika z proporcji terenu.")
+        for w in (l1, e1, l2, e2):
+            self.tip(w, wtip)
         row = ttk.Frame(g)
-        row.grid(row=9, column=0, columnspan=4, sticky="e", pady=(12, 0))
+        row.grid(row=11, column=0, columnspan=4, sticky="e", pady=(12, 0))
 
         def go():
             if not self.src.get().strip() or not os.path.isfile(self.src.get().strip().strip('"')):
                 messagebox.showwarning("Plik", "Wskaż istniejący plik .fit lub .gpx.", parent=win)
                 return
-            steps = [name for name, on in (("terrain", self.want_terrain.get()), ("contours", self.want_contours.get()), ("osm", self.want_osm.get())) if on]
-            net = [k for k, on in (("teren", self.want_terrain.get()), ("osm", self.want_osm.get())) if on]
+            steps = [name for name, on in (("terrain", self.want_terrain.get()), ("contours", self.want_contours.get()), ("streets", self.want_streets.get()), ("osm", self.want_osm.get())) if on]
+            net = [k for k, on in (("teren", self.want_terrain.get()), ("ulice", self.want_streets.get()), ("osm", self.want_osm.get())) if on]
             if net and not messagebox.askyesno("Połączenie z internetem", "\n\n".join(NET_INFO[k] for k in net) + "\n\nKontynuować?", parent=win):
                 return
             win.destroy()
@@ -1032,6 +1122,8 @@ class App:
             self.do_terrain(skip=True, then=nxt)
         elif step == "contours":
             self.do_contours(then=nxt)
+        elif step == "streets":
+            self.do_streets(skip=True, then=nxt)
         elif step == "osm":
             self.do_osm(skip=True, then=nxt)
 
@@ -1085,6 +1177,34 @@ class App:
         self.backup(base, [".png", ".pdf", ".svg", ".meta.json"])
         self.run_job("Warstwice całego terenu", self.contours_args(terrain, base, mi, ma, w, self.c_png.get(), self.c_pdf.get(), self.c_svg.get()), after=then)
 
+    def do_streets(self, skip=False, then=None):
+        terrain = self.pfile("hrf_terrain.json")
+        if not terrain or not os.path.isfile(terrain):
+            messagebox.showwarning("Brak terenu", "Najpierw pobierz teren (zakładka 2. Teren) – mapa ulic obejmuje ten sam obszar.")
+            return
+        layers = [name for name, var in (("roads", self.s_roads), ("cycleways", self.s_cycle), ("streets", self.s_small), ("paths", self.s_paths), ("rivers", self.s_rivers), ("streams", self.s_streams),
+                                         ("water", self.s_water), ("boundaries", self.s_bound)) if var.get()]
+        if not layers:
+            messagebox.showwarning("Nic do narysowania", "Zaznacz co najmniej jedną warstwę.")
+            return
+        if not (self.s_png.get() or self.s_pdf.get() or self.s_svg.get()):
+            messagebox.showwarning("Nic do zapisania", "Zaznacz co najmniej jedno: PNG, PDF albo SVG.")
+            return
+        tile, w = self.num(self.s_tile, "Bok prostokąta", float, 1), self.num(self.s_width, "Szerokość PNG", int, 256)
+        if None in (tile, w):
+            return
+        if not skip and not messagebox.askyesno("Połączenie z internetem", NET_INFO["ulice"] + "\n\nKontynuować?"):
+            return
+        base = self.pfile("hrf_streets")
+        self.backup(base, [".png", ".pdf", ".svg", ".meta.json"])
+        args = [python_exe(), self.tool("hrf_streetmap.py"), terrain, base, "--layers", ",".join(layers), "--admin-levels", self.s_admin.get().strip() or "8",
+                "--tile-km", "%g" % tile, "--png-width", str(w if self.s_png.get() else 0), "--yes"]
+        if not self.s_pdf.get():
+            args.append("--no-pdf")
+        if not self.s_svg.get():
+            args.append("--no-svg")
+        self.run_job("Mapa ulic, rzek i granic", args, after=then)
+
     def do_local(self):
         try:
             bbox = [float(v.get().replace(",", ".")) for v in self.l_bbox]
@@ -1137,6 +1257,88 @@ class App:
     def blender_command(self):
         exe, act = self.blender.get().strip(), self.activity_file()
         return exe, act
+
+    def send_blender(self, cmd):
+        """Polecenie dla uruchomionego Blendera: plik cache/hrf_commands.json obok danych projektu; Blender odpowiada plikiem hrf_commands.ack."""
+        act = self.activity_file()
+        if not act:
+            messagebox.showwarning("Brak danych", "Projekt nie ma jeszcze danych (*_hrf.json), więc nie ma sceny w Blenderze.")
+            return
+        text = self.null_coords.get().strip()
+        if not text:
+            messagebox.showwarning("Współrzędne", "Wpisz współrzędne, np. 49.5791, 20.0501 (szerokość, długość).")
+            return
+        cdir = os.path.join(os.path.dirname(act), "cache")
+        os.makedirs(cdir, exist_ok=True)
+        f, ack = os.path.join(cdir, "hrf_commands.json"), os.path.join(cdir, "hrf_commands.ack")
+        cid = str(int(time.time() * 1000))
+        try:
+            pending = json.load(open(f, encoding="utf-8")) if os.path.isfile(f) else []
+        except Exception:
+            pending = []
+        pending.append({"id": cid, "cmd": cmd, "text": text, "name": self.null_name.get().strip() or "HRF_Null"})
+        tmp = f + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(pending, fh, ensure_ascii=False)
+        os.replace(tmp, f)
+        try:
+            os.remove(ack)
+        except OSError:
+            pass
+        self.logw("\n>>> Wysłano do Blendera: %s %s" % ("null" if cmd == "null" else "pivot", text), "cmd")
+        self.progress_lbl.config(text="Czekam na odpowiedź Blendera…")
+        self.poll_ack(f, ack, cid, 0)
+
+    def poll_ack(self, f, ack, cid, waited):
+        res = None
+        if os.path.isfile(ack):
+            try:
+                for a in json.load(open(ack, encoding="utf-8")):
+                    if a.get("id") == cid:
+                        res = a
+            except Exception:
+                pass
+        if res:
+            self.logw("    Blender: " + res.get("msg", ""), "ok" if res.get("ok") else "err")
+            self.progress_lbl.config(text="Gotowe." if res.get("ok") else "Błąd.")
+            return
+        if waited >= 12000:
+            try:
+                os.remove(f)                      # nieodebrane polecenie nie ma się wykonać później, przy przypadkowym starcie Blendera
+            except OSError:
+                pass
+            self.logw("    Blender nie odpowiedział. Uruchom go (F5) i poczekaj, aż scena się zbuduje – musi to być scena tego samego projektu "
+                      "(zakładka Blender pokazuje, z jakiego pliku powstaje).", "err")
+            self.progress_lbl.config(text="Brak odpowiedzi Blendera.")
+            return
+        self.root.after(500, lambda: self.poll_ack(f, ack, cid, waited + 500))
+
+    def open_blend(self):
+        exe = self.blender.get().strip()
+        if not exe or not os.path.isfile(exe):
+            messagebox.showwarning("Blender", "Nie znaleziono Blendera. Zainstaluj go albo ustaw zmienną HRF_BLENDER na pełną ścieżkę blender.exe.")
+            return
+        key = self.pdir() or ""
+        last = self.blends.get(key, "")
+        path = filedialog.askopenfilename(title="Zapisana scena Blendera (.blend)", filetypes=[("Blender", "*.blend"), ("Wszystkie", "*.*")],
+                                          initialdir=os.path.dirname(last) if last and os.path.isdir(os.path.dirname(last)) else (self.pdir() or ROOT),
+                                          initialfile=os.path.basename(last) if last else "")
+        if not path:
+            return
+        self.blends[key] = path
+        self.save_settings()
+        env = dict(os.environ)
+        env["HRF_ATTACH"] = "1"
+        act = self.activity_file()
+        if act:
+            env["HRF_DATA"] = act
+        try:
+            subprocess.Popen([exe, path, "--python", BLENDER_SCRIPT], env=env, cwd=ROOT)
+        except Exception as e:
+            messagebox.showerror("Blender", "Nie udało się uruchomić: %s" % e)
+            return
+        self.logw("\n>>> Otwarto zapisaną scenę: %s" % path, "cmd")
+        self.logw("    Skrypt dołącza panel HRF bez przebudowy sceny. Dane: %s" % (act or "z pliku sceny"))
 
     def do_blender(self):
         exe, act = self.blender_command()

@@ -12,6 +12,7 @@ data/
    ├─ <projekt>_hrf.json              # dane aktywności (konwerter) – wczytuje je AE i Blender
    ├─ hrf_terrain.json                # wysokości terenu wokół trasy (hrf_terrain_fetch)
    ├─ hrf_contours.png / .pdf / .svg  # warstwice całego terenu (+ .meta.json z zasięgiem)
+   ├─ hrf_streets.png / .pdf / .svg   # mapa ulic, rzek, wody i granic miasta (kontury; osobno od warstwic, ta sama plansza)
    ├─ hrf_local.png / .meta.json      # tekstura lokalna wycinka (hrf_local_texture)
    ├─ hrf_local_terrain.json          # wysokości wycinka (pośredni, do ponownego liczenia warstwic)
    ├─ hrf_osm.json                    # drogi/budynki/woda/zieleń z OpenStreetMap (opcjonalnie)
