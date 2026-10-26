@@ -7,6 +7,7 @@ Wyniki (w tych samych proporcjach, północ u góry, zakres = cały teren):
   <wyjście>.pdf   wektor do edycji (Illustrator, Inkscape, Affinity): czarne tło + białe ścieżki
   <wyjście>.svg   to samo jako SVG z nazwanymi grupami (warstwice-pomocnicze, warstwice-glowne) – wygodniej w edycji
   <wyjście>.png   raster (skala szarości) używany jako tekstura terenu w Blenderze
+  <wyjście>.meta.json   zasięg geograficzny planszy (lat/lng) – po nim Blender układa teksturę na terenie
 
 Blender nie wczytuje PDF jako obrazu. Przepływ: edytujesz PDF/SVG, eksportujesz PNG o tych samych proporcjach
 (ta sama plansza), a w panelu HRF wskazujesz ten PNG jako teksturę terenu.
@@ -445,6 +446,12 @@ def main():
             live_clear()
         write_png_gray(a.output + ".png", pxw, pxh, pix)
         ui_ok("PNG: %s.png  (%d x %d, %s) w %s" % (a.output, pxw, pxh, fmt_size(os.path.getsize(a.output + ".png")), fmt_time(time.time() - t1)))
+    with open(a.output + ".meta.json", "w", encoding="utf-8") as f:
+        json.dump({"lat_s": d["lat_s"], "lat_n": d["lat_n"], "lng_w": d["lng_w"], "lng_e": d["lng_e"],
+                   "rows": R, "cols": C, "step_m": d.get("step_m"), "zoom": d.get("zoom"),
+                   "minor_m": a.minor, "major_m": a.major, "png": os.path.basename(a.output) + ".png" if pxw else None,
+                   "png_width": pxw, "png_height": pxh, "page_pt": [pw, ph]}, f, indent=1)
+    ui_ok("Zasięg planszy: %s.meta.json" % a.output)
     print("")
     ui_box(["Gotowe w %s." % fmt_time(time.time() - t_all),
             "Edytuj PDF/SVG (np. w Illustratorze), potem wyeksportuj PNG",

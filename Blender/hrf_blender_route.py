@@ -22,16 +22,17 @@ Z wiersza poleceń (test bez okna):
 Dane z GPS są prywatne: plik sceny (.blend) z trasą nie powinien trafiać do publicznego repo.
 """
 import bpy
-import json, math, os, sys, glob, zlib, base64, array, traceback
+import json, math, os, sys, glob, zlib, base64, array, traceback, time, re, subprocess
 from bpy.props import (BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty,
                        IntProperty, PointerProperty, StringProperty)
-from mathutils import Vector
+from mathutils import Vector, Matrix
 
 CONFIG = {
     "DATA_PATH": "",          # plik *_hrf.json; puste = najnowszy *_hrf.json w folderze data/ obok repo
-    "MODE": "full",           # "full" = cała jazda skompresowana do FULL_SECONDS, "clip" = okno klipu w czasie rzeczywistym
-    "START_S": 0.0,           # clip: sekunda aktywności, od której zaczyna się klip
-    "DURATION_S": 60.0,       # clip: długość klipu w sekundach
+    "MODE": "full",           # "full" = okno w FULL_SECONDS s; "speed" = okno z przyspieszeniem SPEED x; "clip" = okno w czasie rzeczywistym (1:1)
+    "START_MIN": 0.0,         # początek klipu w minutach liczonych od startu całej aktywności
+    "END_MIN": 0.0,           # koniec klipu w minutach od startu aktywności (0 = do końca jazdy)
+    "SPEED": 10.0,            # speed: przyspieszenie (1 = czas rzeczywisty 1:1, 10 = 10x szybciej)
     "FULL_SECONDS": 40.0,     # full: długość przelotu w sekundach (klatki = FULL_SECONDS * FPS)
     "FULL_SCALE": 50.0,       # full + chase: mnożnik grubości linii, strzałki i odległości kamery
     "FPS": 30,
@@ -49,6 +50,8 @@ CONFIG = {
     "CAM_UP_M": 45.0,         # chase: kamera nad strzałką, m
     "CAM_LOOK_AHEAD_M": 20.0, # chase: kamera patrzy na punkt przed strzałką, m
     "CAM_LENS_MM": 30.0,
+    "ORBIT_TARGET": "null",   # orbit: kamera krąży wokół "null" (obiekt HRF_Pivot, który możesz przesuwać) albo wokół "arrow" (strzałki)
+    "ORBIT_DISTANCE_M": 0.0,  # orbit: odległość kamery od celu w metrach; 0 = automatycznie (cała trasa w kadrze; dla strzałki bliżej)
     "ORBIT_TURNS": 1.0,       # orbit: ile pełnych okrążeń w czasie animacji
     "ORBIT_ELEV_DEG": 40.0,   # orbit: wysokość kamery nad horyzontem (stopnie)
     "ORBIT_START_DEG": -90.0, # orbit: początkowy azymut kamery (stopnie, -90 = od południa)
@@ -296,10 +299,10 @@ def build_track(cfg, raw):
 # ---------------------------------------------------------------- parametry z panelu
 # CONFIG <-> właściwości panelu (scene.hrf)
 PROP_MAP = [
-    ("MODE", "mode"), ("FULL_SECONDS", "full_seconds"), ("START_S", "start_s"), ("DURATION_S", "duration_s"),
+    ("MODE", "mode"), ("SPEED", "speed"), ("FULL_SECONDS", "full_seconds"),
     ("FPS", "fps"), ("RES_X", "res_x"), ("RES_Y", "res_y"), ("EXAG", "exag"), ("CAM_MODE", "cam_mode"),
     ("ORBIT_ELEV_DEG", "orbit_elev"), ("ORBIT_MARGIN", "orbit_margin"), ("ORBIT_TURNS", "orbit_turns"),
-    ("ORBIT_START_DEG", "orbit_start"), ("CAM_LENS_MM", "lens"), ("CAM_BACK_M", "chase_back"),
+    ("ORBIT_START_DEG", "orbit_start"), ("ORBIT_TARGET", "orbit_target"), ("CAM_LENS_MM", "lens"), ("CAM_BACK_M", "chase_back"),
     ("CAM_UP_M", "chase_up"), ("CAM_LOOK_AHEAD_M", "chase_ahead"), ("TERRAIN_DRAPE", "drape"),
     ("TERRAIN_SKIP", "terrain_skip"), ("TERRAIN_COLOR", "terrain_color"), ("TERRAIN_STYLE", "terrain_style"),
     ("TERRAIN_TEXTURE", "terrain_texture"), ("ROUTE_COLOR", "route_color"),
@@ -319,6 +322,16 @@ def props_from_config(scene, overrides=None):
             setattr(p, pname, cfg[ckey])
         except Exception:
             pass
+    ov = overrides or {}
+    start_min, end_min = cfg["START_MIN"], cfg["END_MIN"]
+    if "START_S" in ov:                       # stare klucze w sekundach (flagi --start / --duration)
+        start_min = ov["START_S"] / 60.0
+    if "DURATION_S" in ov:
+        end_min = start_min + ov["DURATION_S"] / 60.0
+    p.start_min, p.end_min = start_min, end_min
+    p.orbit_distance_manual = cfg["ORBIT_DISTANCE_M"] > 0
+    if cfg["ORBIT_DISTANCE_M"] > 0:
+        p.orbit_distance = cfg["ORBIT_DISTANCE_M"]
     p.data_path = cfg["DATA_PATH"]
     p.output_dir = "" if cfg["OUTPUT_DIR"] == DEFAULT_OUT else cfg["OUTPUT_DIR"]
     p.use_terrain = cfg["TERRAIN"] != "off"
@@ -332,6 +345,8 @@ def cfg_from_props(scene):
     for ckey, pname in PROP_MAP:
         v = getattr(p, pname)
         cfg[ckey] = tuple(v) if ckey.endswith("_COLOR") else v
+    cfg["START_MIN"], cfg["END_MIN"] = p.start_min, p.end_min
+    cfg["ORBIT_DISTANCE_M"] = p.orbit_distance if p.orbit_distance_manual else 0.0     # 0 = automatycznie
     cfg["DATA_PATH"] = p.data_path
     cfg["OUTPUT_DIR"] = p.output_dir or DEFAULT_OUT
     cfg["TERRAIN"] = ("auto" if not p.terrain_path else p.terrain_path) if p.use_terrain else "off"
@@ -345,14 +360,27 @@ def calc_sizes(cfg, T, p):
     lens = cfg["CAM_LENS_MM"]
     orbit = cfg["CAM_MODE"] == "orbit"
     full = cfg["MODE"] == "full"
-    s = cfg["FULL_SCALE"] if (full and not orbit) else 1.0
+    if orbit:
+        s = 1.0
+    elif full:
+        s = cfg["FULL_SCALE"]
+    elif cfg["MODE"] == "speed":
+        s = max(1.0, min(cfg["FULL_SCALE"], cfg["SPEED"] / 5.0))      # kamera za strzałką przy dużym przyspieszeniu stoi dalej
+    else:
+        s = 1.0
     px_per_rad = lens / 36.0 * max(rx, ry)                                     # sensor 36 mm na dłuższym boku kadru
     half_short = (36.0 * min(rx, ry) / float(max(rx, ry)) / 2.0) / lens       # tan(pół kąta widzenia) na krótszym boku
     out = {"s": s, "orbit": orbit, "orbit_dist": 0.0}
     if orbit:
         span = math.sqrt(E["w"] ** 2 + E["h"] ** 2 + E["zr"] ** 2) / 2.0
-        d = span / half_short * cfg["ORBIT_MARGIN"]
+        fit = span / half_short * cfg["ORBIT_MARGIN"]                 # cała trasa w kadrze
+        if cfg["ORBIT_DISTANCE_M"] > 0:
+            d = cfg["ORBIT_DISTANCE_M"]
+        else:
+            d = fit * 0.06 if cfg["ORBIT_TARGET"] == "arrow" else fit   # wokół strzałki domyślnie dużo bliżej
+        d = max(d, 5.0)
         out["orbit_dist"] = d
+        out["fit_dist"] = fit
         radius = cfg["ORBIT_TUBE_PX"] * d / px_per_rad
         arrow_len = cfg["ORBIT_ARROW_PX"] * d / px_per_rad
     else:
@@ -363,14 +391,57 @@ def calc_sizes(cfg, T, p):
     return out
 
 
+MAX_FRAMES = 36000     # 20 min przy 30 fps; więcej to godziny zapisywania kluczy i gigantyczny render
+
+
+def window_bounds(cfg, T):
+    """Okno aktywności (sekundy od startu) z pól początek/koniec w minutach; koniec 0 = do końca jazdy."""
+    end = T["n"] - 1.0
+    t0 = min(max(0.0, cfg["START_MIN"] * 60.0), max(0.0, end - 1.0))
+    t1 = cfg["END_MIN"] * 60.0 if cfg["END_MIN"] > 0 else end
+    t1 = min(t1, end)
+    if t1 - t0 < 1.0:
+        raise RuntimeError("Koniec klipu musi być co najmniej sekundę po początku (cała aktywność trwa %.1f min)." % (end / 60.0))
+    return t0, t1
+
+
 def time_map(cfg, T):
+    """(t0, speed, liczba klatek, fps): od której sekundy aktywności, ile sekund aktywności na sekundę animacji."""
     fps = int(cfg["FPS"])
-    if cfg["MODE"] == "full":
-        t0, nsec = 0.0, cfg["FULL_SECONDS"]
-        speed = (T["n"] - 1) / float(nsec)
+    mode = cfg["MODE"]
+    t0, t1 = window_bounds(cfg, T)
+    win = t1 - t0
+    if mode == "full":
+        nsec = cfg["FULL_SECONDS"]
+        speed = win / float(nsec)
+    elif mode == "speed":
+        speed = max(0.01, cfg["SPEED"])
+        nsec = win / speed
     else:
-        t0, nsec, speed = cfg["START_S"], cfg["DURATION_S"], 1.0
-    return t0, speed, max(2, int(round(nsec * fps))), fps
+        speed, nsec = 1.0, win
+    nf = max(2, int(round(nsec * fps)))
+    if nf > MAX_FRAMES:
+        raise RuntimeError("Animacja miałaby %d klatek (limit %d, ok. %.0f min). Zmniejsz okno albo zwiększ przyspieszenie."
+                           % (nf, MAX_FRAMES, MAX_FRAMES / float(fps) / 60.0))
+    return t0, speed, nf, fps
+
+
+def _hms(sec):
+    sec = int(round(sec))
+    return "%d:%02d:%02d" % (sec // 3600, (sec % 3600) // 60, sec % 60)
+
+
+def time_summary(scene):
+    """Jedna linia do panelu: ile klatek, jak długo i jaką część aktywności pokazuje animacja."""
+    T = STATE.get("T")
+    if not T:
+        return ""
+    try:
+        t0, speed, nf, fps = time_map(cfg_from_props(scene), T)
+    except RuntimeError as e:
+        return str(e)
+    t1 = min(T["n"] - 1.0, t0 + (nf - 1) / float(fps) * speed)
+    return "%d klatek = %.1f s | %s× | %.1f–%.1f min z %.1f" % (nf, nf / float(fps), ("%.3g" % speed), t0 / 60.0, t1 / 60.0, (T["n"] - 1.0) / 60.0)
 
 
 # ---------------------------------------------------------------- obiekty sceny
@@ -505,8 +576,39 @@ def find_contour_texture(p, T):
     return t if t and os.path.isfile(t) else ""
 
 
+def find_local_texture(p, T):
+    """PNG lokalnej tekstury warstwic (hrf_local.png obok danych albo wskazany w panelu) i jego zasięg z .meta.json."""
+    png = bpy.path.abspath(p.local_texture) if p.local_texture else ""
+    if not png and T.get("path"):
+        png = os.path.join(os.path.dirname(os.path.abspath(T["path"])), "hrf_local.png")
+    if not png or not os.path.isfile(png):
+        return None, None
+    meta_path = os.path.splitext(png)[0] + ".meta.json"
+    if not os.path.isfile(meta_path):
+        return None, None
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            return png, json.load(f)
+    except Exception:
+        return None, None
+
+
+def _image_node(nt, path, extension):
+    img = bpy.data.images.load(path, check_existing=True)
+    try:
+        img.reload()                                  # po ponownym wygenerowaniu/wyeksportowaniu pokaże się nowa wersja
+    except Exception:
+        pass
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.image = img
+    tex.interpolation = "Linear"
+    tex.extension = extension
+    return tex
+
+
 def apply_terrain_style(scene):
-    """Materiał terenu: gładki szary albo warstwice z tekstury (czarne tło, białe linie, bez oświetlenia)."""
+    """Materiał terenu: gładki szary albo warstwice z tekstury (czarne tło, białe linie, bez oświetlenia).
+    Gdy istnieje lokalna tekstura wycinka (hrf_local.png), jest nakładana na globalną w obrębie wycinka."""
     o, T = STATE["objs"], STATE["T"]
     if not o.get("terrain") or not T:
         return
@@ -520,17 +622,49 @@ def apply_terrain_style(scene):
     if p.terrain_style == "contours":
         path = find_contour_texture(p, T)
         if path:
-            img = bpy.data.images.load(path, check_existing=True)
-            try:
-                img.reload()                                  # po ponownym wyeksportowaniu PNG pokaże się nowa wersja
-            except Exception:
-                pass
-            tex = nt.nodes.new("ShaderNodeTexImage")
-            tex.image = img
-            tex.interpolation = "Linear"
-            tex.extension = "EXTEND"
+            tc = nt.nodes.new("ShaderNodeTexCoord")
+            tex_g = _image_node(nt, path, "EXTEND")
+            nt.links.new(tc.outputs["UV"], tex_g.inputs["Vector"])
+            color = tex_g.outputs["Color"]
+            lpath, meta = find_local_texture(p, T) if p.local_use else (None, None)
+            if lpath:
+                tr = T["terrain"]
+                wg, hg = tr["lng_e"] - tr["lng_w"], tr["lat_n"] - tr["lat_s"]
+                wl, hl = meta["lng_e"] - meta["lng_w"], meta["lat_n"] - meta["lat_s"]
+                mp = nt.nodes.new("ShaderNodeMapping")
+                mp.vector_type = "POINT"
+                mp.inputs["Location"].default_value = ((tr["lng_w"] - meta["lng_w"]) / wl, (tr["lat_s"] - meta["lat_s"]) / hl, 0.0)
+                mp.inputs["Scale"].default_value = (wg / wl, hg / hl, 1.0)
+                nt.links.new(tc.outputs["UV"], mp.inputs["Vector"])
+                tex_l = _image_node(nt, lpath, "CLIP")
+                nt.links.new(mp.outputs["Vector"], tex_l.inputs["Vector"])
+                sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+                nt.links.new(mp.outputs["Vector"], sep.inputs["Vector"])
+
+                def cmp(op, src, val):
+                    n = nt.nodes.new("ShaderNodeMath")
+                    n.operation = op
+                    nt.links.new(src, n.inputs[0])
+                    n.inputs[1].default_value = val
+                    return n.outputs[0]
+
+                def mul(a_, b_):
+                    n = nt.nodes.new("ShaderNodeMath")
+                    n.operation = "MULTIPLY"
+                    nt.links.new(a_, n.inputs[0])
+                    nt.links.new(b_, n.inputs[1])
+                    return n.outputs[0]
+                mask = mul(mul(cmp("GREATER_THAN", sep.outputs["X"], 0.0), cmp("LESS_THAN", sep.outputs["X"], 1.0)),
+                           mul(cmp("GREATER_THAN", sep.outputs["Y"], 0.0), cmp("LESS_THAN", sep.outputs["Y"], 1.0)))
+                mix = nt.nodes.new("ShaderNodeMix")
+                mix.data_type = "RGBA"
+                cols_in = [i for i in mix.inputs if i.type == "RGBA"]
+                nt.links.new(mask, mix.inputs[0])
+                nt.links.new(color, cols_in[0])
+                nt.links.new(tex_l.outputs["Color"], cols_in[1])
+                color = [i for i in mix.outputs if i.type == "RGBA"][0]
             em = nt.nodes.new("ShaderNodeEmission")
-            nt.links.new(tex.outputs["Color"], em.inputs["Color"])
+            nt.links.new(color, em.inputs["Color"])
             nt.links.new(em.outputs[0], out.inputs[0])
             mat.diffuse_color = (0.0, 0.0, 0.0, 1.0)
             return
@@ -540,6 +674,119 @@ def apply_terrain_style(scene):
     bsdf.inputs["Color"].default_value = (c[0], c[1], c[2], 1.0)
     nt.links.new(bsdf.outputs[0], out.inputs[0])
     mat.diffuse_color = (c[0], c[1], c[2], 1.0)
+
+
+# ---------------------------------------------------------------- tekstura lokalna (wycinek z okna czasu)
+def region_bbox(scene):
+    """Prostokąt (lat/lng) obejmujący trasę pokazaną w bieżącym oknie czasu plus margines (panel: Margines wycinka)."""
+    T = STATE["T"]
+    if not T:
+        raise RuntimeError("Scena nie jest zbudowana – kliknij 'Przebuduj scenę'.")
+    cfg = cfg_from_props(scene)
+    p = scene.hrf
+    t0, speed, nf, fps = time_map(cfg, T)
+    xs, ys = [], []
+    step = max(1, nf // 400)
+    for fi in list(range(0, nf, step)) + [nf - 1]:
+        t = max(0.0, min(T["n"] - 1.0, t0 + fi / float(fps) * speed))
+        xs.append(at(T["x"], t))
+        ys.append(at(T["y"], t))
+    m = max(50.0, p.local_margin)
+    lat0, lng0, kx, ky = T["proj"]
+    lat_s, lat_n = lat0 + (min(ys) - m) / ky, lat0 + (max(ys) + m) / ky
+    lng_w, lng_e = lng0 + (min(xs) - m) / kx, lng0 + (max(xs) + m) / kx
+    tr = T["terrain"]
+    if tr:                                   # tekstura ma sens tylko na terenie
+        lat_s, lat_n = max(lat_s, tr["lat_s"]), min(lat_n, tr["lat_n"])
+        lng_w, lng_e = max(lng_w, tr["lng_w"]), min(lng_e, tr["lng_e"])
+    return lat_s, lat_n, lng_w, lng_e, (lng_e - lng_w) * kx, (lat_n - lat_s) * ky
+
+
+def local_paths(T):
+    here = script_dirs()[0] if script_dirs() else os.getcwd()
+    tool = os.path.normpath(os.path.join(here, "..", "tools", "hrf_local_texture.py"))
+    out = os.path.join(os.path.dirname(os.path.abspath(T["path"])), "hrf_local")
+    return tool, out
+
+
+def local_params(wm, hm):
+    """Parametry generatora dobrane do rozmiaru wycinka: duży wycinek = mniej szczegółów, żeby nie ściągać setek kafelków."""
+    size = max(wm, hm)
+    zoom = 14 if size <= 8000 else (13 if size <= 20000 else 12)
+    step = int(max(5, min(40, round(size / 700.0))))
+    minor = 10 if size <= 8000 else (20 if size <= 20000 else 25)
+    width = int(min(8192, max(2048, round(wm * 1.25 / 256.0) * 256)))      # ok. 0,8 m na piksel (do 8192 px)
+    return {"zoom": zoom, "step": step, "minor": minor, "major": minor * 5, "width": width}
+
+
+def local_command(scene, python=None, bbox=None, out=None):
+    """Gotowa komenda generatora tekstury dla bieżącego wycinka (do wklejenia w terminalu).
+    bbox (lat_s, lat_n, lng_w, lng_e, szerokość_m, wysokość_m) i out można podać jawnie (np. w testach)."""
+    T = STATE["T"]
+    lat_s, lat_n, lng_w, lng_e, wm, hm = bbox if bbox else region_bbox(scene)
+    tool, out_default = local_paths(T)
+    out = out or out_default
+    prm = local_params(wm, hm)
+    exe = python or ("py" if os.name == "nt" else "python3")
+    quote = (lambda x: '"%s"' % x) if " " in exe else (lambda x: x)
+    bb = "%.6f,%.6f,%.6f,%.6f" % (lat_s, lat_n, lng_w, lng_e)
+    cmd = '%s "%s" --bbox %s --out "%s" --zoom %d --step %d --minor %d --major %d --png-width %d --yes' % (
+        quote(exe), tool, bb, out, prm["zoom"], prm["step"], prm["minor"], prm["major"], prm["width"])
+    return cmd, (tool, out, bb, prm, wm, hm)
+
+
+LOCAL = {"proc": None, "scene": None, "log": None}
+
+
+def _local_timer():
+    pr = LOCAL["proc"]
+    if pr is None:
+        return None
+    sc = bpy.data.scenes.get(LOCAL["scene"] or "")
+    last = ""
+    try:
+        with open(LOCAL["log"], "rb") as f:
+            f.seek(max(0, os.path.getsize(LOCAL["log"]) - 600))
+            for ln in f.read().decode("utf-8", "replace").replace("\r", "\n").split("\n"):
+                if ln.strip():
+                    last = ln.strip()
+    except Exception:
+        pass
+    if pr.poll() is None:
+        if sc is not None:
+            sc.hrf.local_status = "Generuję teksturę lokalną... " + last[:60]
+        return 1.0
+    rc = pr.returncode
+    LOCAL["proc"] = None
+    if sc is not None:
+        if rc == 0:
+            sc.hrf.local_status = "Gotowe – tekstura lokalna wczytana."
+            try:
+                apply_terrain_style(sc)
+            except Exception:
+                traceback.print_exc()
+        else:
+            sc.hrf.local_status = "Błąd generatora (kod %s): %s" % (rc, last[:80])
+    return None
+
+
+def start_local_generation(scene, bbox=None, out=None):
+    if LOCAL["proc"] is not None and LOCAL["proc"].poll() is None:
+        raise RuntimeError("Generator już działa – poczekaj na koniec.")
+    cmd_text, (tool, out, bb, prm, wm, hm) = local_command(scene, bbox=bbox, out=out)
+    if not os.path.isfile(tool):
+        raise RuntimeError("Nie znaleziono narzędzia: " + tool)
+    exe = sys.executable if sys.executable and os.path.isfile(sys.executable) else ("py" if os.name == "nt" else "python3")
+    args = [exe, tool, "--bbox", bb, "--out", out, "--zoom", str(prm["zoom"]), "--step", str(prm["step"]),
+            "--minor", str(prm["minor"]), "--major", str(prm["major"]), "--png-width", str(prm["width"]), "--yes"]
+    width = prm["width"]
+    log = out + ".log"
+    fh = open(log, "wb")
+    LOCAL["proc"] = subprocess.Popen(args, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    LOCAL["scene"], LOCAL["log"] = scene.name, log
+    scene.hrf.local_status = "Generuję teksturę lokalną (%.1f x %.1f km, PNG %d px)..." % (wm / 1000.0, hm / 1000.0, width)
+    bpy.app.timers.register(_local_timer, first_interval=1.0)
+    return log
 
 
 def make_terrain(T, cfg, col):
@@ -650,17 +897,15 @@ def key_objects(scene, cfg, T):
     prefs.keyframe_new_interpolation_type = old
 
 
-def key_camera(scene, cfg, T, sz):
-    """Kamera: orbit (krąży wokół całej trasy) albo chase (za strzałką, z bezwładnością)."""
+def key_chase_camera(scene, cfg, T, sz):
+    """Kamera za strzałką (z bezwładnością), pozycje zapisane klatka po klatce."""
     cam = STATE["objs"]["cam"]
-    cam.animation_data_clear()
     t0, speed, nf, fps = time_map(cfg, T)
-    orbit, s = sz["orbit"], sz["s"]
-    E = T["ext"]
+    s = sz["s"]
     cd = cam.data
     cd.lens = cfg["CAM_LENS_MM"]
-    cd.clip_start = 0.5 * s if not orbit else max(1.0, sz["orbit_dist"] * 0.01)
-    cd.clip_end = 400000.0 if not orbit else sz["orbit_dist"] * 4.0
+    cd.clip_start = 0.5 * s
+    cd.clip_end = 400000.0
     prefs = bpy.context.preferences.edit
     old = prefs.keyframe_new_interpolation_type
     prefs.keyframe_new_interpolation_type = "LINEAR"
@@ -673,27 +918,19 @@ def key_camera(scene, cfg, T, sz):
     def terr_z(x, y):
         return (terrain_at(T["terrain"], lat0 + y / ky, lng0 + x / kx) - T["zmin_ref"]) * cfg["EXAG"]
     clearance = max(10.0 * s, 0.4 * up)
-    el = math.radians(cfg["ORBIT_ELEV_DEG"])
-    az0 = math.radians(cfg["ORBIT_START_DEG"])
-    pivot = Vector((E["cx"], E["cy"], E["cz"]))
     cam_pos = cam_phi = prev_eul = None
     for fi in range(nf):
         fr = 1 + fi
         t = max(0.0, min(T["n"] - 1.0, t0 + fi / float(fps) * speed))
         P = Vector((at(T["x"], t), at(T["y"], t), at(T["z"], t)))
-        if orbit:
-            az = az0 + 2.0 * math.pi * cfg["ORBIT_TURNS"] * fi / float(nf)
-            cam_pos = pivot + Vector((math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el))) * sz["orbit_dist"]
-            look = pivot
-        else:
-            target_phi = at(T["phi_cam"], t)
-            cam_phi = target_phi if cam_phi is None else cam_phi + (target_phi - cam_phi) * a_yaw
-            fwd = Vector((math.cos(cam_phi), math.sin(cam_phi), 0.0))
-            want = P - fwd * back + Vector((0.0, 0.0, up))
-            cam_pos = want if cam_pos is None else cam_pos + (want - cam_pos) * a_pos
-            look = P + fwd * ahead
+        target_phi = at(T["phi_cam"], t)
+        cam_phi = target_phi if cam_phi is None else cam_phi + (target_phi - cam_phi) * a_yaw
+        fwd = Vector((math.cos(cam_phi), math.sin(cam_phi), 0.0))
+        want = P - fwd * back + Vector((0.0, 0.0, up))
+        cam_pos = want if cam_pos is None else cam_pos + (want - cam_pos) * a_pos
+        look = P + fwd * ahead
         cam_use = cam_pos.copy()
-        if T["terrain"] and not orbit:
+        if T["terrain"]:
             cam_use.z = max(cam_use.z, terr_z(cam_use.x, cam_use.y) + clearance)    # kamera nie wchodzi pod teren
         cq = (look - cam_use).to_track_quat("-Z", "Y")
         cam.location = cam_use
@@ -702,6 +939,138 @@ def key_camera(scene, cfg, T, sz):
         cam.keyframe_insert("location", frame=fr)
         cam.keyframe_insert("rotation_euler", frame=fr)
     prefs.keyframe_new_interpolation_type = old
+
+
+# Orbita i rozmiary są sterowane DRIVERAMI czytającymi pola panelu (scene.hrf). Dzięki temu pola można animować
+# (najedź na pole i wciśnij I), a przeliczanie sceny nie kasuje ani nie nadpisuje klatek kluczowych.
+DRIVER_VARS = {
+    "vA": "hrf.orbit_auto", "vD": "hrf.orbit_distance", "vM": "hrf.orbit_distance_manual",
+    "vE": "hrf.orbit_elev", "vS": "hrf.orbit_start", "vT": "hrf.orbit_turns",
+    "vL": "hrf.line_scale", "vDs": "hrf.done_scale", "vAs": "hrf.arrow_scale", "vN": "frame_end",
+}
+DEFF = "max(5, vA + (vD - vA) * vM)"      # odległość kamery od celu: automatyczna albo ręczna (animowalna)
+
+
+def set_driver(owner, path, index, expr, scene):
+    """Driver skryptowy z prostym wyrażeniem (nie wymaga zgody na uruchamianie skryptów Pythona)."""
+    try:
+        owner.driver_remove(path, index)
+    except Exception:
+        pass
+    fc = owner.driver_add(path, index)
+    for m in list(fc.modifiers):
+        fc.modifiers.remove(m)
+    drv = fc.driver
+    drv.type = "SCRIPTED"
+    drv.expression = expr
+    for name, dp in DRIVER_VARS.items():
+        if re.search(r"\b%s\b" % name, expr):
+            v = drv.variables.new()
+            v.name = name
+            v.type = "SINGLE_PROP"
+            tg = v.targets[0]
+            tg.id_type = "SCENE"
+            tg.id = scene
+            tg.data_path = dp
+    return fc
+
+
+def remove_orbit_drivers():
+    o = STATE["objs"]
+    pairs = [(o["cam"], "location"), (o["cam"].data, "clip_start"), (o["rig"], "rotation_euler"),
+             (o["route"].data, "bevel_depth"), (o["done"].data, "bevel_depth"), (o["arrow"], "scale"),
+             (o["route"], "location"), (o["done"], "location"), (o["arrow"], "delta_location")]
+    for owner, path in pairs:
+        try:
+            owner.driver_remove(path)
+        except Exception:
+            pass
+
+
+def install_orbit_drivers(scene, cfg):
+    """Pozycja kamery (odległość, wysokość), obrót rigu, grubość linii, rozmiar strzałki i podniesienie nad teren."""
+    o, T = STATE["objs"], STATE["T"]
+    cam, rig = o["cam"], o["rig"]
+    cam.location = (0.0, 0.0, 0.0)
+    set_driver(cam, "location", 0, "cos(radians(vE)) * " + DEFF, scene)
+    set_driver(cam, "location", 2, "sin(radians(vE)) * " + DEFF, scene)
+    set_driver(cam.data, "clip_start", -1, "0.002 * " + DEFF, scene)
+    set_driver(rig, "rotation_euler", 2, "radians(vS) + 2 * pi * vT * (frame - 1) / vN", scene)
+    rx, ry = int(cfg["RES_X"]), int(cfg["RES_Y"])
+    ppr = cfg["CAM_LENS_MM"] / 36.0 * max(rx, ry)                    # piksele na radian
+    kr, ka = cfg["ORBIT_TUBE_PX"] / ppr, cfg["ORBIT_ARROW_PX"] / ppr
+    radius = "%.9g * %s * vL" % (kr, DEFF)                           # promień linii w pikselach ekranu
+    set_driver(o["route"].data, "bevel_depth", -1, radius, scene)
+    set_driver(o["done"].data, "bevel_depth", -1, radius + " * vDs", scene)
+    for i in range(3):
+        set_driver(o["arrow"], "scale", i, "%.9g * %s * vAs" % (ka, DEFF), scene)
+    if T["terrain"]:                                                 # rura leży na terenie, nie w nim
+        lift = "1.6 * " + radius
+        set_driver(o["route"], "location", 2, lift, scene)
+        set_driver(o["done"], "location", 2, lift, scene)
+        set_driver(o["arrow"], "delta_location", 2, lift, scene)
+
+
+def refresh_orbit(scene):
+    """Cel (null albo strzałka), ogniskowa i drivery orbity; wołane przy zmianie celu, ogniskowej, rozdzielczości, trybu."""
+    o, T = STATE["objs"], STATE["T"]
+    if not o or not T or "rig" not in o:
+        return
+    cfg = cfg_from_props(scene)
+    p = scene.hrf
+    if cfg["CAM_MODE"] != "orbit":
+        return
+    cam, rig, pivot = o["cam"], o["rig"], o["pivot"]
+    tgt = o["arrow"] if p.orbit_target == "arrow" else pivot
+    for c in rig.constraints:
+        if c.type == "COPY_LOCATION":
+            c.target = tgt
+    for c in cam.constraints:
+        if c.type == "TRACK_TO":
+            c.target = tgt
+    cfg_auto = dict(cfg)
+    cfg_auto["ORBIT_DISTANCE_M"] = 0.0
+    auto = calc_sizes(cfg_auto, T, p)["orbit_dist"]
+    old_busy = STATE["busy"]
+    STATE["busy"] = True
+    try:
+        p.orbit_auto = auto
+    finally:
+        STATE["busy"] = old_busy
+    cam.data.lens = p.lens
+    cam.data.clip_end = 400000.0
+    pivot.empty_display_size = max(10.0, auto * 0.03)
+    install_orbit_drivers(scene, cfg)
+
+
+def setup_camera(scene):
+    """Ustawia kamerę wg trybu: orbita (rig + constraints, na żywo) albo za strzałką (zapisane klatki)."""
+    o, T = STATE["objs"], STATE["T"]
+    cfg = cfg_from_props(scene)
+    sz = calc_sizes(cfg, T, scene.hrf)
+    cam, rig, pivot = o["cam"], o["rig"], o["pivot"]
+    remove_orbit_drivers()
+    cam.animation_data_clear()
+    rig.animation_data_clear()
+    for c in list(cam.constraints):
+        cam.constraints.remove(c)
+    for c in list(rig.constraints):
+        rig.constraints.remove(c)
+    cam.parent = None
+    cam.matrix_parent_inverse = Matrix.Identity(4)
+    cam.location = (0.0, 0.0, 0.0)
+    cam.rotation_euler = (0.0, 0.0, 0.0)
+    if sz["orbit"]:
+        cam.parent = rig
+        rig.constraints.new("COPY_LOCATION")
+        tt = cam.constraints.new("TRACK_TO")
+        tt.track_axis = "TRACK_NEGATIVE_Z"
+        tt.up_axis = "UP_Y"
+        pivot.hide_viewport = False
+        refresh_orbit(scene)
+    else:
+        pivot.hide_viewport = True
+        key_chase_camera(scene, cfg, T, sz)
 
 
 def apply_render_settings(scene, cfg, nf):
@@ -722,26 +1091,22 @@ def apply_render_settings(scene, cfg, nf):
 
 
 def apply_look(scene):
-    """Grubość linii, rozmiar strzałki (na żywo, bez przeliczania animacji)."""
+    """Grubość linii i rozmiar strzałki. W orbicie robią to drivery (refresh_orbit); przy kamerze za strzałką – wartości stałe."""
     o, T = STATE["objs"], STATE["T"]
     if not o or not T:
         return
     cfg = cfg_from_props(scene)
-    p = scene.hrf
-    sz = calc_sizes(cfg, T, p)
+    if cfg["CAM_MODE"] == "orbit":
+        return
+    sz = calc_sizes(cfg, T, scene.hrf)
     r = sz["radius"]
     lift = r * 1.6 if T["terrain"] else 0.0
     o["route"].data.bevel_depth = r
     o["done"].data.bevel_depth = r * cfg["DONE_SCALE"]
-    for key in ("route", "done"):                       # rura leży na terenie, nie w nim
-        sp = o[key].data.splines[0]
-        for i, bp in enumerate(STATE["base_pts"]):
-            sp.points[i].co = (bp[0], bp[1], bp[2] + lift, 1.0)
+    o["route"].location.z = lift                         # rura leży na terenie, nie w nim
+    o["done"].location.z = lift
     o["arrow"].scale = (sz["arrow_len"],) * 3
-    z0 = 0.15 + (lift / sz["arrow_len"] if sz["arrow_len"] > 0 else 0.0)
-    for v, nv in zip(o["arrow"].data.vertices, arrow_verts(z0)):
-        v.co = nv
-    o["arrow"].data.update()
+    o["arrow"].delta_location.z = lift
 
 
 def apply_colors(scene):
@@ -759,6 +1124,9 @@ def build_scene(scene):
     p = scene.hrf
     raw = load_raw(cfg)
     T = build_track(cfg, raw)
+    old_pivot = bpy.data.objects.get("HRF_Pivot")        # przesunięty ręcznie null zostaje po przebudowie
+    keep_loc = old_pivot.location.copy() if old_pivot else None
+    keep_exag = STATE.get("exag_built") or cfg["EXAG"]
     STATE["objs"], STATE["T"] = {}, None      # stare obiekty zostaną usunięte
     col = clean_scene()
     sz = calc_sizes(cfg, T, p)
@@ -771,20 +1139,31 @@ def build_scene(scene):
         o["terrain"], nv = make_terrain(T, cfg, col)
         o["sun"] = make_light(col, scene)
         terrain_info = {"file": T["terrain_path"], "vertices": nv, "draped": bool(cfg["TERRAIN_DRAPE"])}
-    STATE["base_pts"] = T["pts"]
     o["route"] = make_curve("HRF_Route", T["pts"], sz["radius"], mat_route, col)
     o["done"] = make_curve("HRF_RouteDone", T["pts"], sz["radius"] * cfg["DONE_SCALE"], mat_done, col)
     o["arrow"] = make_arrow("HRF_Arrow", mat_arrow, col)
     cam = bpy.data.objects.new("HRF_Camera", bpy.data.cameras.new("HRF_Camera"))
     col.objects.link(cam)
     o["cam"] = cam
+    E = T["ext"]
+    pivot = bpy.data.objects.new("HRF_Pivot", None)      # null: cel orbity kamery, przesuwaj go (G) albo animuj
+    pivot.empty_display_type = "SPHERE"
+    pivot.location = (E["cx"], E["cy"], E["cz"]) if keep_loc is None else (keep_loc.x, keep_loc.y, keep_loc.z * cfg["EXAG"] / max(1e-6, keep_exag))
+    col.objects.link(pivot)
+    rig = bpy.data.objects.new("HRF_Rig", None)          # obraca się wokół celu; kamera jest jego dzieckiem
+    rig.empty_display_type = "PLAIN_AXES"
+    rig.empty_display_size = 1.0
+    rig.hide_select = True
+    col.objects.link(rig)
+    o["pivot"], o["rig"] = pivot, rig
+    STATE["exag_built"] = cfg["EXAG"]
     STATE["objs"], STATE["T"] = o, T
     apply_look(scene)
     apply_sun(scene)
     apply_colors(scene)
     apply_terrain_style(scene)
     key_objects(scene, cfg, T)
-    key_camera(scene, cfg, T, sz)
+    setup_camera(scene)
     t0, speed, nf, fps = time_map(cfg, T)
     engine = apply_render_settings(scene, cfg, nf)
     scene.frame_set(1)
@@ -804,10 +1183,9 @@ def apply_time_camera(scene):
     if not T or not STATE["objs"]:
         raise RuntimeError("Scena nie jest zbudowana – kliknij 'Przebuduj scenę'.")
     cfg = cfg_from_props(scene)
-    sz = calc_sizes(cfg, T, scene.hrf)
     apply_look(scene)
     key_objects(scene, cfg, T)
-    key_camera(scene, cfg, T, sz)
+    setup_camera(scene)
     t0, speed, nf, fps = time_map(cfg, T)
     apply_render_settings(scene, cfg, nf)
     scene.frame_set(1)
@@ -817,9 +1195,93 @@ def apply_time_camera(scene):
 
 # ---------------------------------------------------------------- panel (właściwości, operatory, UI)
 def _upd_look(self, context):
-    if STATE["busy"]:
+    if STATE["busy"] or not STATE["objs"]:
+        return
+    if context.scene.hrf.cam_mode == "orbit":      # w orbicie grubość i rozmiar liczą drivery (można je animować)
         return
     try:
+        apply_look(context.scene)
+    except Exception:
+        traceback.print_exc()
+
+
+_PENDING = {"t": 0.0, "scene": None, "scheduled": False}
+
+
+def _apply_timer():
+    """Po ostatniej zmianie czasu (ok. 0,7 s ciszy) przelicza animację: długość, klatki, klucze strzałki i kamery."""
+    if time.time() - _PENDING["t"] < 0.7:
+        return 0.3
+    _PENDING["scheduled"] = False
+    sc = bpy.data.scenes.get(_PENDING["scene"] or "")
+    if sc is None or not STATE["objs"]:
+        return None
+    try:
+        apply_time_camera(sc)
+    except RuntimeError as e:          # np. za dużo klatek – komunikat w panelu zamiast wyjątku
+        sc.hrf.info = str(e)
+        print("[HRF] " + str(e))
+    except Exception:
+        traceback.print_exc()
+    return None
+
+
+def _upd_time(self, context):
+    """Zmiana czasu/trybu/przyspieszenia/FPS/rozdzielczości: animacja przelicza się sama po chwili."""
+    if STATE["busy"] or not STATE["objs"]:
+        return
+    sc = context.scene
+    _PENDING["t"] = time.time()
+    _PENDING["scene"] = sc.name
+    try:
+        sc.hrf.info = "Zmieniono czas – przeliczam animację..."
+    except Exception:
+        pass
+    if not _PENDING["scheduled"]:
+        _PENDING["scheduled"] = True
+        bpy.app.timers.register(_apply_timer, first_interval=0.8)
+
+
+def _upd_orbit(self, context):
+    """Zmiana celu, odległości, wysokości, ogniskowej albo obrotów orbity – na żywo."""
+    if STATE["busy"] or not STATE["objs"]:
+        return
+    try:
+        if context.scene.hrf.cam_mode == "orbit":
+            refresh_orbit(context.scene)
+        else:
+            STATE["objs"]["cam"].data.lens = context.scene.hrf.lens
+    except Exception:
+        traceback.print_exc()
+
+
+def _upd_dist_manual(self, context):
+    """Włączenie 'Odległość ręcznie' ustawia pole na bieżącą odległość automatyczną, żeby kamera nie skoczyła."""
+    if STATE["busy"] or not STATE["objs"] or not STATE["T"]:
+        return
+    try:
+        sc = context.scene
+        p = sc.hrf
+        if p.orbit_distance_manual:
+            cfg = cfg_from_props(sc)
+            cfg["ORBIT_DISTANCE_M"] = 0.0
+            auto = calc_sizes(cfg, STATE["T"], p)["orbit_dist"]
+            STATE["busy"] = True
+            try:
+                p.orbit_distance = float(round(auto))
+            finally:
+                STATE["busy"] = False
+        if p.cam_mode == "orbit":
+            refresh_orbit(sc)
+    except Exception:
+        traceback.print_exc()
+
+
+def _upd_cam_mode(self, context):
+    if STATE["busy"] or not STATE["objs"]:
+        return
+    try:
+        setup_camera(context.scene)
         apply_look(context.scene)
     except Exception:
         traceback.print_exc()
@@ -856,24 +1318,38 @@ class HRFProps(bpy.types.PropertyGroup):
     info: StringProperty(name="Stan", default="")
     data_path: StringProperty(name="Plik danych", subtype="FILE_PATH", default="",
                               description="Plik *_hrf.json; puste = najnowszy w folderze data/ obok repo")
-    mode: EnumProperty(name="Tryb", default="full", items=[
-        ("full", "Cała jazda (przelot)", "Cała aktywność skompresowana do podanej liczby sekund"),
-        ("clip", "Klip (czas rzeczywisty)", "Okno klipu: początek + długość w sekundach aktywności")])
-    full_seconds: FloatProperty(name="Długość przelotu (s)", default=40.0, min=1.0, soft_max=300.0)
-    start_s: FloatProperty(name="Początek klipu (s)", default=0.0, min=0.0)
-    duration_s: FloatProperty(name="Długość klipu (s)", default=60.0, min=0.1, soft_max=600.0)
-    fps: IntProperty(name="FPS", default=30, min=1, max=120)
-    res_x: IntProperty(name="Szerokość", default=1920, min=16, max=16384)
-    res_y: IntProperty(name="Wysokość", default=1080, min=16, max=16384)
-    cam_mode: EnumProperty(name="Kamera", default="orbit", items=[
+    mode: EnumProperty(name="Tryb", default="full", update=_upd_time, items=[
+        ("full", "Cała jazda w N sekund", "Cała aktywność skompresowana do podanej liczby sekund"),
+        ("speed", "Przyspieszenie (×)", "Czas rzeczywisty ×N: 1 = 1:1, 10 = dziesięć razy szybciej; długość animacji wynika z okna i przyspieszenia"),
+        ("clip", "Klip 1:1 (czas rzeczywisty)", "Okno od początku do końca w czasie rzeczywistym, bez przyspieszenia")])
+    speed: FloatProperty(name="Przyspieszenie ×", default=10.0, min=0.1, soft_max=300.0, precision=1, update=_upd_time,
+                         description="1 = czas rzeczywisty (1:1), 10 = dziesięć razy szybciej")
+    start_min: FloatProperty(name="Początek (min)", default=0.0, min=0.0, soft_max=600.0, precision=2, update=_upd_time,
+                             description="Początek klipu w minutach od startu całej aktywności")
+    end_min: FloatProperty(name="Koniec (min)", default=0.0, min=0.0, soft_max=600.0, precision=2, update=_upd_time,
+                           description="Koniec klipu w minutach od startu całej aktywności; 0 = do końca jazdy")
+    full_seconds: FloatProperty(name="Długość przelotu (s)", default=40.0, min=1.0, soft_max=300.0, update=_upd_time)
+    fps: IntProperty(name="FPS", default=30, min=1, max=120, update=_upd_time)
+    res_x: IntProperty(name="Szerokość", default=1920, min=16, max=16384, update=_upd_time)
+    res_y: IntProperty(name="Wysokość", default=1080, min=16, max=16384, update=_upd_time)
+    cam_mode: EnumProperty(name="Kamera", default="orbit", update=_upd_cam_mode, items=[
         ("orbit", "Orbita (cała trasa)", "Cała trasa w kadrze, kamera krąży wokół"),
         ("chase", "Za strzałką", "Kamera jedzie za strzałką")])
+    orbit_target: EnumProperty(name="Cel orbity", default="null", update=_upd_orbit, items=[
+        ("null", "Null (przesuwalny punkt)", "Kamera krąży wokół obiektu HRF_Pivot; przesuń go (G) lub animuj"),
+        ("arrow", "Strzałka", "Kamera krąży wokół strzałki i jedzie razem z nią")])
+    orbit_distance_manual: BoolProperty(name="Odległość ręcznie", default=False, update=_upd_dist_manual,
+                                        description="Wyłączone = automatycznie (null: cała trasa w kadrze, strzałka: bliżej)")
+    orbit_distance: FloatProperty(name="Odległość od celu (m)", default=1000.0, min=5.0, soft_min=50.0, soft_max=100000.0,
+                                  step=10000, precision=0)
+    orbit_auto: FloatProperty(name="Odległość automatyczna (m)", default=1000.0, min=5.0, precision=0,
+                              description="Wyliczana przez skrypt (cała trasa w kadrze albo bliżej strzałki)")
     orbit_elev: FloatProperty(name="Wysokość kamery (°)", default=40.0, min=5.0, max=89.0)
-    orbit_margin: FloatProperty(name="Zapas w kadrze", default=0.9, min=0.3, max=3.0,
+    orbit_margin: FloatProperty(name="Zapas w kadrze", default=0.9, min=0.3, max=3.0, update=_upd_orbit,
                                 description="Mniej = kamera bliżej; poniżej ok. 0.8 trasa może wychodzić poza kadr")
     orbit_turns: FloatProperty(name="Okrążenia", default=1.0, min=-10.0, max=10.0)
     orbit_start: FloatProperty(name="Start orbity (°)", default=-90.0)
-    lens: FloatProperty(name="Ogniskowa (mm)", default=30.0, min=8.0, max=200.0)
+    lens: FloatProperty(name="Ogniskowa (mm)", default=30.0, min=8.0, max=200.0, update=_upd_orbit)
     chase_back: FloatProperty(name="Za strzałką (m)", default=60.0, min=1.0)
     chase_up: FloatProperty(name="Nad strzałką (m)", default=45.0, min=1.0)
     chase_ahead: FloatProperty(name="Patrzy przed siebie (m)", default=20.0, min=0.0)
@@ -899,6 +1375,14 @@ class HRFProps(bpy.types.PropertyGroup):
         ("contours", "Warstwice (tekstura)", "Czarne tło, białe warstwice z pliku PNG (tools/hrf_contours.py)")])
     terrain_texture: StringProperty(name="PNG warstwic", subtype="FILE_PATH", default="", update=_upd_terrain_style,
                                     description="Puste = hrf_contours.png obok pliku terenu; po edycji w Illustratorze wyeksportuj PNG o tych samych proporcjach")
+    local_use: BoolProperty(name="Użyj tekstury lokalnej", default=True, update=_upd_terrain_style,
+                            description="Nakłada hrf_local.png (wycinek w wysokiej jakości) na globalną teksturę warstwic")
+    local_margin: FloatProperty(name="Margines wycinka (m)", default=1500.0, min=50.0, soft_max=10000.0,
+                                description="O ile szerszy od pokazywanej trasy jest wycinek tekstury lokalnej")
+    local_texture: StringProperty(name="PNG lokalny", subtype="FILE_PATH", default="", update=_upd_terrain_style,
+                                  description="Puste = hrf_local.png obok danych trasy (wraz z hrf_local.meta.json)")
+    local_cmd: StringProperty(name="Komenda", default="")
+    local_status: StringProperty(name="Stan tekstury lokalnej", default="")
     terrain_color: FloatVectorProperty(name="Teren", subtype="COLOR", size=3, min=0.0, max=1.0,
                                        default=(0.17, 0.19, 0.22), update=_upd_colors)
     sun_azimuth: FloatProperty(name="Słońce: azymut (°)", default=135.0, update=_upd_sun)
@@ -931,11 +1415,86 @@ class HRF_OT_rebuild(bpy.types.Operator):
 
 class HRF_OT_apply(bpy.types.Operator):
     bl_idname = "hrf.apply"
-    bl_label = "Zastosuj czas i kamerę"
-    bl_description = "Szybko przelicza animację (czas, kamera, strzałka, przejechany odcinek) bez przebudowy terenu"
+    bl_label = "Przelicz animację teraz"
+    bl_description = "Zmiany czasu przeliczają się same po chwili; ten przycisk robi to od razu (czas, kamera, strzałka, przejechany odcinek)"
 
     def execute(self, context):
         return _run_op(self, lambda: apply_time_camera(context.scene), lambda n: "Animacja: %d klatek" % n)
+
+
+class HRF_OT_set_speed(bpy.types.Operator):
+    bl_idname = "hrf.set_speed"
+    bl_label = "Ustaw przyspieszenie"
+    bl_description = "Ustawia tryb przyspieszenia i podaną wartość (1 = czas rzeczywisty 1:1)"
+    value: FloatProperty(default=1.0)
+
+    def execute(self, context):
+        p = context.scene.hrf
+        STATE["busy"] = True               # wartości ustawiamy tu, a przeliczenie robi operator (bez opóźnionego duplikatu)
+        try:
+            p.mode = "speed"
+            p.speed = self.value
+        finally:
+            STATE["busy"] = False
+        return _run_op(self, lambda: apply_time_camera(context.scene), lambda n: "Przyspieszenie %g×: %d klatek" % (self.value, n))
+
+
+class HRF_OT_select_pivot(bpy.types.Operator):
+    bl_idname = "hrf.select_pivot"
+    bl_label = "Zaznacz null (pivot)"
+    bl_description = "Zaznacza obiekt HRF_Pivot w oknie 3D – przesuń go klawiszem G, ustaw w Item (N) albo animuj"
+
+    def execute(self, context):
+        def go():
+            pv = STATE["objs"].get("pivot")
+            if pv is None:
+                raise RuntimeError("Scena nie jest zbudowana – kliknij 'Przebuduj scenę'.")
+            pv.hide_viewport = False
+            for ob in context.view_layer.objects:
+                ob.select_set(False)
+            pv.select_set(True)
+            context.view_layer.objects.active = pv
+        return _run_op(self, go, "Zaznaczono HRF_Pivot")
+
+
+class HRF_OT_center_pivot(bpy.types.Operator):
+    bl_idname = "hrf.center_pivot"
+    bl_label = "Null na środek trasy"
+    bl_description = "Przywraca null (pivot) na środek trasy"
+
+    def execute(self, context):
+        def go():
+            pv, T = STATE["objs"].get("pivot"), STATE["T"]
+            if pv is None or not T:
+                raise RuntimeError("Scena nie jest zbudowana – kliknij 'Przebuduj scenę'.")
+            E = T["ext"]
+            pv.location = (E["cx"], E["cy"], E["cz"])
+        return _run_op(self, go, "Null przywrócony na środek trasy")
+
+
+class HRF_OT_local_command(bpy.types.Operator):
+    bl_idname = "hrf.local_command"
+    bl_label = "Kopiuj komendę (wycinek)"
+    bl_description = ("Liczy wycinek z bieżącego okna czasu, kopiuje do schowka gotową komendę generatora tekstury lokalnej "
+                      "(wklej w terminalu); wynik wczyta się po 'Wczytaj teksturę ponownie'")
+
+    def execute(self, context):
+        def go():
+            cmd, info = local_command(context.scene)
+            context.scene.hrf.local_cmd = cmd
+            context.window_manager.clipboard = cmd
+            return info
+        return _run_op(self, go, lambda i: "Komenda w schowku: wycinek %.1f x %.1f km, PNG %d px, kafelki z=%d" % (i[4] / 1000.0, i[5] / 1000.0, i[3]["width"], i[3]["zoom"]))
+
+
+class HRF_OT_local_run(bpy.types.Operator):
+    bl_idname = "hrf.local_run"
+    bl_label = "Wygeneruj teraz"
+    bl_description = ("Uruchamia generator tekstury lokalnej w tle (potrzebny internet na drobniejsze kafelki wysokości); "
+                      "po zakończeniu materiał terenu odświeży się sam")
+
+    def execute(self, context):
+        return _run_op(self, lambda: start_local_generation(context.scene), lambda log: "Uruchomiono generator (log: %s)" % log)
 
 
 class HRF_OT_reload_texture(bpy.types.Operator):
@@ -1000,12 +1559,21 @@ class HRF_PT_time(_Sub, bpy.types.Panel):
     def draw(self, context):
         p = context.scene.hrf
         lay = self.layout
+        T = STATE.get("T")
+        if T:
+            lay.label(text="Cała aktywność: %.1f min (%s)" % ((T["n"] - 1.0) / 60.0, _hms(T["n"] - 1.0)), icon="TIME")
+        row = lay.row(align=True)
+        row.prop(p, "start_min")
+        row.prop(p, "end_min")
         lay.prop(p, "mode")
         if p.mode == "full":
             lay.prop(p, "full_seconds")
-        else:
-            lay.prop(p, "start_s")
-            lay.prop(p, "duration_s")
+        elif p.mode == "speed":
+            lay.prop(p, "speed")
+            row = lay.row(align=True)
+            for lab, val in (("1:1", 1.0), ("5×", 5.0), ("10×", 10.0), ("30×", 30.0), ("60×", 60.0), ("120×", 120.0)):
+                row.operator("hrf.set_speed", text=lab).value = val
+        lay.label(text=time_summary(context.scene))
         row = lay.row(align=True)
         row.prop(p, "res_x")
         row.prop(p, "res_y")
@@ -1023,10 +1591,25 @@ class HRF_PT_camera(_Sub, bpy.types.Panel):
         lay.prop(p, "cam_mode", text="")
         lay.prop(p, "lens")
         if p.cam_mode == "orbit":
+            lay.prop(p, "orbit_target")
+            lay.prop(p, "orbit_distance_manual")
+            row = lay.row()
+            row.active = p.orbit_distance_manual            # wyszarzone, ale nadal można animować
+            row.prop(p, "orbit_distance")
+            lay.label(text="Automatycznie: %.0f m" % p.orbit_auto)
+            if p.orbit_target == "null":
+                row = lay.row(align=True)
+                row.operator("hrf.select_pivot", icon="EMPTY_AXIS")
+                row.operator("hrf.center_pivot", icon="PIVOT_BOUNDBOX")
             lay.prop(p, "orbit_elev")
-            lay.prop(p, "orbit_margin")
+            if not p.orbit_distance_manual and p.orbit_target == "null":
+                lay.prop(p, "orbit_margin")
             lay.prop(p, "orbit_turns")
             lay.prop(p, "orbit_start")
+            box = lay.box()
+            box.label(text="Animacja: najedź na pole (odległość, wysokość,", icon="KEYFRAME")
+            box.label(text="okrążenia, grubość linii...) i wciśnij I.")
+            box.label(text="Odległość animuje się przy włączonym 'ręcznie'.")
         else:
             lay.prop(p, "chase_back")
             lay.prop(p, "chase_up")
@@ -1070,6 +1653,18 @@ class HRF_PT_terrain(_Sub, bpy.types.Panel):
             if p.terrain_style == "contours":
                 lay.prop(p, "terrain_texture")
                 lay.operator("hrf.reload_texture", icon="FILE_REFRESH")
+                box = lay.box()
+                box.label(text="Tekstura lokalna (wycinek z okna czasu)", icon="TEXTURE")
+                box.prop(p, "local_use")
+                box.prop(p, "local_margin")
+                box.prop(p, "local_texture")
+                row = box.row(align=True)
+                row.operator("hrf.local_command", icon="COPYDOWN")
+                row.operator("hrf.local_run", icon="PLAY")
+                if p.local_cmd:
+                    box.prop(p, "local_cmd", text="")
+                if p.local_status:
+                    box.label(text=p.local_status)
         lay.operator("hrf.rebuild", icon="FILE_REFRESH")
 
 
@@ -1085,7 +1680,8 @@ class HRF_PT_render(_Sub, bpy.types.Panel):
         lay.operator("hrf.render_anim", icon="RENDER_ANIMATION")
 
 
-CLASSES = [HRFProps, HRF_OT_rebuild, HRF_OT_apply, HRF_OT_reload_texture, HRF_OT_render_frame, HRF_OT_render_anim,
+CLASSES = [HRFProps, HRF_OT_rebuild, HRF_OT_apply, HRF_OT_set_speed, HRF_OT_select_pivot, HRF_OT_center_pivot,
+           HRF_OT_local_command, HRF_OT_local_run, HRF_OT_reload_texture, HRF_OT_render_frame, HRF_OT_render_anim,
            HRF_PT_main, HRF_PT_time, HRF_PT_camera, HRF_PT_look, HRF_PT_terrain, HRF_PT_render]
 
 
@@ -1147,7 +1743,9 @@ def _cli():
               "--duration": ("DURATION_S", float), "--exag": ("EXAG", float), "--full-seconds": ("FULL_SECONDS", float),
               "--fps": ("FPS", int), "--cam": ("CAM_MODE", str), "--turns": ("ORBIT_TURNS", float),
               "--orbit-margin": ("ORBIT_MARGIN", float), "--orbit-elev": ("ORBIT_ELEV_DEG", float),
-              "--res-x": ("RES_X", int), "--res-y": ("RES_Y", int), "--terrain-style": ("TERRAIN_STYLE", str),
+              "--res-x": ("RES_X", int), "--res-y": ("RES_Y", int), "--terrain-style": ("TERRAIN_STYLE", str), "--orbit-target": ("ORBIT_TARGET", str), "--speed": ("SPEED", float),
+              "--start-min": ("START_MIN", float), "--end-min": ("END_MIN", float),
+              "--orbit-distance": ("ORBIT_DISTANCE_M", float),
               "--terrain-texture": ("TERRAIN_TEXTURE", str)}
     while i < len(argv):
         a = argv[i]

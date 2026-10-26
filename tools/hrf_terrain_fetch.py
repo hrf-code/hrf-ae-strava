@@ -7,6 +7,8 @@ i zapisuje regularną siatkę wysokości do pliku dla skryptu Blendera (Blender/
 Użycie (potrzebny Python 3 i internet, bez dodatkowych bibliotek):
     py tools/hrf_terrain_fetch.py data/aktywnosc_hrf.json data/hrf_terrain.json
     py tools/hrf_terrain_fetch.py data/aktywnosc_hrf.json data/hrf_terrain.json --zoom 13 --step 25 --margin 1500
+    py tools/hrf_terrain_fetch.py - data/hrf_local_terrain.json --bbox 49.55,49.58,20.60,20.65 --zoom 14 --step 10
+      (sam wycinek: --bbox LAT_POŁUDNIE,LAT_PÓŁNOC,LNG_ZACHÓD,LNG_WSCHÓD, zamiast pliku trasy podaj "-")
 
 Co widać w trakcie: plan (obszar, liczba kafelków, rozmiar siatki), pytanie o zgodę, pasek postępu pobierania
 z szacowanym czasem, błędy i ponowienia, postęp próbkowania siatki, podsumowanie.
@@ -19,6 +21,7 @@ Opcje:
   --zoom N       poziom kafelków (domyślnie 13: ok. 12 m/piksel na szerokości 50°; 12 = 25 m, 14 = 6 m)
   --step M       oczko siatki wyjściowej w metrach (domyślnie 25)
   --margin M     margines terenu wokół trasy w metrach (domyślnie 1500)
+  --bbox A,B,C,D wycinek zamiast obszaru trasy: lat_południe,lat_północ,lng_zachód,lng_wschód (plik trasy: "-")
   --tries N      liczba prób na kafelek (domyślnie 5)
   --timeout S    limit czasu jednego kafelka w sekundach (domyślnie 30)
   --url SZABLON  własny szablon adresu kafelków, np. https://host/{z}/{x}/{y}.png (format Terrarium)
@@ -249,11 +252,12 @@ def tile_frac(lat, lng, z):
 # ---------------------------------------------------------------- program
 def main():
     ap = argparse.ArgumentParser(description="Pobiera wysokości terenu wokół trasy (kafelki Terrarium) dla Blendera.")
-    ap.add_argument("data", help="plik *_hrf.json z konwertera")
+    ap.add_argument("data", help="plik *_hrf.json z konwertera (przy --bbox wpisz -)")
     ap.add_argument("output", help="plik wyjściowy, np. data/hrf_terrain.json")
     ap.add_argument("--zoom", type=int, default=13)
     ap.add_argument("--step", type=float, default=25.0)
     ap.add_argument("--margin", type=float, default=1500.0)
+    ap.add_argument("--bbox", help="wycinek: lat_s,lat_n,lng_w,lng_e (zamiast obszaru wokół trasy)")
     ap.add_argument("--tries", type=int, default=5)
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--url", default=URL)
@@ -269,24 +273,36 @@ def main():
 
     # ----- 1. obszar
     ui_head("1. Obszar")
-    if not os.path.isfile(a.data):
-        ui_warn("Nie ma pliku: " + a.data)
-        ui_info("Folder, w którym jesteś: " + os.getcwd())
-        return 1
-    with open(a.data, encoding="utf-8-sig") as f:
-        D = json.load(f)
-    S = D.get("samples") or D
-    lat, lng = S["lat"], S["lng"]
-    ui_ok("Wczytano %d punktów trasy" % len(lat))
-    latc = (min(lat) + max(lat)) / 2.0
     dlat_m = math.radians(1.0) * EARTH_R
-    dlng_m = dlat_m * math.cos(math.radians(latc))
-    lat_s, lat_n = min(lat) - a.margin / dlat_m, max(lat) + a.margin / dlat_m
-    lng_w, lng_e = min(lng) - a.margin / dlng_m, max(lng) + a.margin / dlng_m
-    w_km, h_km = (lng_e - lng_w) * dlng_m / 1000.0, (lat_n - lat_s) * dlat_m / 1000.0
+    if a.bbox:
+        try:
+            lat_s, lat_n, lng_w, lng_e = [float(v) for v in a.bbox.split(",")]
+            assert lat_n > lat_s and lng_e > lng_w
+        except Exception:
+            ui_warn("--bbox podaj jako lat_południe,lat_północ,lng_zachód,lng_wschód (cztery liczby, północ > południe).")
+            return 1
+        latc = (lat_s + lat_n) / 2.0
+        dlng_m = dlat_m * math.cos(math.radians(latc))
+        ui_ok("Wycinek z --bbox (bez pliku trasy)")
+        w_km, h_km = (lng_e - lng_w) * dlng_m / 1000.0, (lat_n - lat_s) * dlat_m / 1000.0
+    else:
+        if not os.path.isfile(a.data):
+            ui_warn("Nie ma pliku: " + a.data)
+            ui_info("Folder, w którym jesteś: " + os.getcwd())
+            return 1
+        with open(a.data, encoding="utf-8-sig") as f:
+            D = json.load(f)
+        S = D.get("samples") or D
+        lat, lng = S["lat"], S["lng"]
+        ui_ok("Wczytano %d punktów trasy" % len(lat))
+        latc = (min(lat) + max(lat)) / 2.0
+        dlng_m = dlat_m * math.cos(math.radians(latc))
+        lat_s, lat_n = min(lat) - a.margin / dlat_m, max(lat) + a.margin / dlat_m
+        lng_w, lng_e = min(lng) - a.margin / dlng_m, max(lng) + a.margin / dlng_m
+        w_km, h_km = (lng_e - lng_w) * dlng_m / 1000.0, (lat_n - lat_s) * dlat_m / 1000.0
     rows = int((lat_n - lat_s) * dlat_m / a.step) + 1
     cols = int((lng_e - lng_w) * dlng_m / a.step) + 1
-    ui_info("Obszar z marginesem %.0f m: %.1f x %.1f km" % (a.margin, w_km, h_km))
+    ui_info("Obszar%s: %.1f x %.1f km" % ("" if a.bbox else " z marginesem %.0f m" % a.margin, w_km, h_km))
     ui_info("Siatka wyjściowa: %d x %d (oczko %.0f m) = %d wierzchołków" % (cols, rows, a.step, rows * cols))
     if rows * cols > 1500000:
         ui_warn("To dużo wierzchołków dla Blendera. Rozważ większe --step (np. %d)." % int(a.step * 1.5))
