@@ -73,6 +73,7 @@ CONFIG = {
     "SUN_AZIMUTH_DEG": 135.0, # kierunek, z którego świeci słońce (stopnie od osi X; 135 = północny zachód)
     "SUN_ELEV_DEG": 40.0,
     "SUN_STRENGTH": 3.0,
+    "OWN_WORLD": True,        # True = nie zmieniaj środowiska (World) sceny, zostaje Twoje (np. domyślne z Blendera); False = skrypt ustawia własne
     "OUTPUT_DIR": "//hrf_render/",
 }
 
@@ -311,6 +312,7 @@ PROP_MAP = [
     ("TERRAIN_TEXTURE", "terrain_texture"), ("ROUTE_COLOR", "route_color"),
     ("DONE_COLOR", "done_color"), ("ARROW_COLOR", "arrow_color"), ("SUN_AZIMUTH_DEG", "sun_azimuth"),
     ("SUN_ELEV_DEG", "sun_elev"), ("SUN_STRENGTH", "sun_strength"), ("DONE_SCALE", "done_scale"),
+    ("OWN_WORLD", "own_world"),
 ]
 DEFAULT_OUT = "//hrf_render/"
 
@@ -923,11 +925,23 @@ def make_terrain(T, cfg, col):
     return ob, len(verts)
 
 
-def make_light(col, scene):
-    """Słońce + słabe światło otoczenia, żeby bryła terenu była czytelna."""
+def make_light(col, scene, own_world=True):
+    """Słońce + światło otoczenia, żeby bryła terenu była czytelna.
+    own_world=True: środowisko (World) sceny zostaje takie, jakie ustawiłeś (np. domyślne z pliku startowego);
+    własny „HRF_World” powstaje tylko wtedy, gdy scena nie ma żadnego World."""
     li = bpy.data.lights.new("HRF_Sun", "SUN")
     ob = bpy.data.objects.new("HRF_Sun", li)
     col.objects.link(ob)
+    cur = scene.world
+    is_hrf = cur is not None and cur.name.startswith("HRF_World")
+    if own_world:
+        prev = bpy.data.worlds.get(scene.get("hrf_prev_world", "")) or bpy.data.worlds.get("World")
+        if is_hrf and prev is not None:          # wcześniej podmienione przez skrypt – wracamy do Twojego środowiska
+            scene.world = prev
+        if scene.world is not None:
+            return ob
+    elif cur is not None and not is_hrf:
+        scene["hrf_prev_world"] = cur.name       # zapamiętaj, żeby dało się wrócić
     w = bpy.data.worlds.get("HRF_World") or bpy.data.worlds.new("HRF_World")
     try:
         w.use_nodes = True
@@ -1231,7 +1245,7 @@ def build_scene(scene):
     terrain_info = None
     if T["terrain"]:
         o["terrain"], nv = make_terrain(T, cfg, col)
-        o["sun"] = make_light(col, scene)
+        o["sun"] = make_light(col, scene, cfg["OWN_WORLD"])
         terrain_info = {"file": T["terrain_path"], "vertices": nv, "draped": bool(cfg["TERRAIN_DRAPE"])}
     o["route"] = make_curve("HRF_Route", T["pts"], sz["radius"], mat_route, col)
     o["done"] = make_curve("HRF_RouteDone", T["pts"], sz["radius"] * cfg["DONE_SCALE"], mat_done, col)
@@ -1497,6 +1511,9 @@ class HRFProps(bpy.types.PropertyGroup):
     sun_azimuth: FloatProperty(name="Słońce: azymut (°)", default=135.0, update=_upd_sun)
     sun_elev: FloatProperty(name="Słońce: wysokość (°)", default=40.0, min=1.0, max=90.0, update=_upd_sun)
     sun_strength: FloatProperty(name="Słońce: siła", default=3.0, min=0.0, soft_max=10.0, update=_upd_sun)
+    own_world: BoolProperty(name="Zostaw moje środowisko (World)", default=True,
+                            description="Włączone: skrypt nie zmienia środowiska (World) sceny, zostaje Twoje. Wyłączone: ustawia własne, jasne tło "
+                                        "(działa po „Przebuduj scenę”). Siła słońca 0 wyłącza też słońce HRF")
     output_dir: StringProperty(name="Folder renderu", subtype="DIR_PATH", default="",
                                description="PNG z przezroczystością; puste = folder hrf_render obok pliku .blend")
 
@@ -1763,6 +1780,7 @@ class HRF_PT_look(_Sub, bpy.types.Panel):
         lay.prop(p, "done_color")
         lay.prop(p, "arrow_color")
         lay.prop(p, "terrain_color")
+        lay.prop(p, "own_world")
         lay.prop(p, "sun_azimuth")
         lay.prop(p, "sun_elev")
         lay.prop(p, "sun_strength")

@@ -58,6 +58,9 @@ w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym 
   „N klatek = X s | prędkość | okno od–do min”. Zmiana czasu przelicza animację sama po ok. 0,7 s. Limit 36000 klatek (20 min
   przy 30 fps): np. cała 4-godzinna jazda w 1:1 to ponad 400 tys. klatek, więc zwiększ przyspieszenie lub zawęź okno.
 - `EXAG` – przewyższenie terenu i trasy (1 = skala rzeczywista, domyślnie 1,5 = czytelne i naturalne, 3 = mocno przesadzone).
+- **Środowisko (World):** domyślnie skrypt go nie rusza – zostaje Twoje (np. standardowe z pliku startowego Blendera). Dotyczy to też
+  sceny z terenem; własny jasny World powstaje tylko, gdy scena nie ma żadnego albo wyłączysz „Zostaw moje środowisko (World)”
+  w panelu (Wygląd) / `OWN_WORLD = False` w `CONFIG` (po „Przebuduj scenę”). Słońce HRF jest osobno: siła 0 je wyłącza.
 - **Teren (sama geometria, bez tekstur):** `py tools/hrf_terrain_fetch.py data/<projekt>/<projekt>_hrf.json data/<projekt>/hrf_terrain.json`
   pobiera wysokości z otwartych kafelków (Mapzen/AWS Terrain Tiles) z planem, postępem i Ctrl+C jak narzędzie OSM
   (`--zoom 13`, `--step 25`, `--margin 1500`). Skrypt Blendera sam znajdzie `hrf_terrain.json` w folderze projektu, zbuduje siatkę terenu,

@@ -263,7 +263,10 @@ class App:
         plik.add_command(label="Otwórz folder projektu", command=self.open_project_folder)
         plik.add_command(label="Otwórz folder data/", command=lambda: self.open_folder(self.data_dir))
         plik.add_separator()
+        plik.add_command(label="Uruchom Blendera ze skryptem", accelerator="F5", command=self.do_blender)
+        plik.add_separator()
         plik.add_command(label="Zakończ", command=self.quit)
+        self.root.bind("<F5>", lambda e: self.do_blender())
         bar.add_cascade(label="Plik", menu=plik)
         pomoc = tk.Menu(bar, tearoff=0)
         pomoc.add_command(label="Jak to działa (przepływ pracy)", command=lambda: self.nb.select(self.tabs["start"]))
@@ -306,7 +309,10 @@ class App:
         self.tip(b, "Otwiera folder data/<projekt>/ w Eksploratorze Windows.")
         b = ttk.Button(f, text="Nowy projekt z pliku FIT/GPX…", command=self.new_project_dialog)
         b.pack(side="left", padx=6)
-        self.tip(b, "Wybierasz plik .fit/.gpx ze Stravy; powstaje nowy projekt i od razu przechodzisz do zakładki Dane, żeby go skonwertować.")
+        self.tip(b, "Okno nowego projektu: wskazujesz plik .fit/.gpx i folder, a program sam konwertuje dane i przygotowuje teren oraz warstwice.")
+        b = ttk.Button(f, text="▶ Blender (F5)", command=self.do_blender)
+        b.pack(side="right")
+        self.tip(b, "Uruchamia Blendera ze skryptem HRF dla wybranego projektu. Działa w każdej chwili, także gdy w tle trwa pobieranie danych. Skrót: F5.")
 
     # ---- panel stanu plików projektu
     def build_status(self):
@@ -511,9 +517,10 @@ class App:
         self.intro_labels.append(lab)
         self.tip(lab, "Plik danych, z którego Blender zbuduje scenę: najnowszy *_hrf.json z folderu projektu wybranego na liście u góry okna. "
                       "Żeby zbudować scenę dla innej jazdy, wybierz jej projekt na liście (albo najpierw ją skonwertuj w zakładce 1. Dane).")
-        b = self.action(f, "Uruchom Blendera ze sceną", self.do_blender,
-                        "Startuje Blendera i buduje scenę z pliku *_hrf.json wybranego projektu (a teren, warstwice i OSM bierze z folderu projektu). "
-                        "Blender otwiera się w osobnym oknie.")
+        b = ttk.Button(f, text="Uruchom Blendera ze sceną (F5)", command=self.do_blender)
+        self.tip(b, "Startuje Blendera i buduje scenę z pliku *_hrf.json wybranego projektu (a teren, warstwice i OSM bierze z folderu projektu). "
+                    "Blender otwiera się w osobnym oknie. Działa w każdej chwili, także podczas pobierania danych; to samo robi przycisk u góry okna, "
+                    "wpis w menu Plik i klawisz F5.")
         b.pack(anchor="w", padx=14, pady=6)
         b = ttk.Button(f, text="Kopiuj ścieżkę skryptu Blendera", command=lambda: self.copy_text(BLENDER_SCRIPT))
         b.pack(anchor="w", padx=14)
