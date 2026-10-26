@@ -31,7 +31,7 @@ w `CONFIG`) → Run Script. Potem Render → Render Animation: PNG z przezroczys
 - `CAM_MODE = "chase"` – kamera za strzałką i nad nią (okno klipu: `START_S` + `DURATION_S`, czas rzeczywisty).
 - `CAM_MODE = "orbit"` + `MODE = "full"` – cała jazda w kadrze, kamera krąży wokół trasy (`ORBIT_TURNS`), strzałka jedzie
   po trasie; przelot skompresowany do `FULL_SECONDS` sekund.
-- `EXAG` – przewyższenie (1 = skala rzeczywista, 3–4 wyraźnie w widoku z daleka).
+- `EXAG` – przewyższenie terenu i trasy (1 = skala rzeczywista, domyślnie 1,5 = czytelne i naturalne, 3 = mocno przesadzone).
 - **Teren (sama geometria, bez tekstur):** `py tools/hrf_terrain_fetch.py data/<nazwa>_hrf.json data/hrf_terrain.json`
   pobiera wysokości z otwartych kafelków (Mapzen/AWS Terrain Tiles) z planem, postępem i Ctrl+C jak narzędzie OSM
   (`--zoom 13`, `--step 25`, `--margin 1500`). Skrypt Blendera sam znajdzie `data/hrf_terrain.json`, zbuduje siatkę terenu,

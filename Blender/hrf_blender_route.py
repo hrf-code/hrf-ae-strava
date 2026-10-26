@@ -31,7 +31,7 @@ CONFIG = {
     "FPS": 30,
     "RES_X": 1080,
     "RES_Y": 1920,
-    "EXAG": 3.0,              # przewyższenie (1 = skala rzeczywista, 3 = wyraźnie w widoku z daleka)
+    "EXAG": 1.5,              # przewyższenie (1 = skala rzeczywista, 1.5 = czytelne i naturalne, 3 = mocno przesadzone)
     "POINT_MIN_M": 4.0,       # minimalny odstęp punktów krzywej trasy, m
     "SMOOTH_XY_S": 4.0,       # wygładzanie pozycji (połowa okna, s)
     "SMOOTH_Z_S": 12.0,       # wygładzanie wysokości (połowa okna, s)
