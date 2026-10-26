@@ -36,7 +36,7 @@ except Exception:
     pass
 
 W = 64
-TTY = sys.stdout.isatty()
+TTY = sys.stdout.isatty() or os.environ.get("HRF_LIVE") == "1"
 
 
 # ---------------------------------------------------------------- interfejs

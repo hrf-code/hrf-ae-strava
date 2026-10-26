@@ -12,7 +12,7 @@ Użycie (potrzebny Python 3 i internet, bez dodatkowych bibliotek):
 
 Co widać w trakcie: plan (obszar, liczba kafelków, rozmiar siatki), pytanie o zgodę, pasek postępu pobierania
 z szacowanym czasem, błędy i ponowienia, postęp próbkowania siatki, podsumowanie.
-Przerwanie: Ctrl+C w dowolnej chwili – pobrane kafelki zostają w pamięci podręcznej (<plik wyjściowy>.cache),
+Przerwanie: Ctrl+C w dowolnej chwili – pobrane kafelki zostają w pamięci podręcznej (<folder pliku wyjściowego>/cache/),
 ponowne uruchomienie dociąga tylko brakujące.
 
 Do serwera trafiają numery kafelków (z/x/y) pokrywających obszar trasy, bez samej trasy.
@@ -45,7 +45,7 @@ URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
 SOURCE = "Mapzen/AWS Terrain Tiles (SRTM, NED, GMTED i inne), https://github.com/tilezen/joerd/blob/master/docs/attribution.md"
 EARTH_R = 6371008.8
 W = 64
-TTY = sys.stdout.isatty()
+TTY = sys.stdout.isatty() or os.environ.get("HRF_LIVE") == "1"
 SPIN = "|/-\\"
 STATE = {"total": 0, "cached": 0}
 
@@ -242,6 +242,21 @@ def fetch_tile(url, label, tries, timeout):
     return None
 
 
+def cache_dir_for(output):
+    """Pamięć podręczna obok pliku wyjściowego, w podfolderze cache/ (porządek w folderze projektu).
+    Stary układ (<plik>.cache) jest przenoszony automatycznie."""
+    base = os.path.splitext(os.path.basename(output))[0]
+    new = os.path.join(os.path.dirname(os.path.abspath(output)), "cache", base)
+    old = output + ".cache"
+    if os.path.isdir(old) and not os.path.isdir(new):
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        try:
+            os.replace(old, new)
+        except OSError:
+            return old
+    return new
+
+
 def tile_frac(lat, lng, z):
     n = 2.0 ** z
     x = (lng + 180.0) / 360.0 * n
@@ -314,7 +329,7 @@ def main():
     x1, y0 = tile_frac(lat_n, lng_e, z)
     tx0, tx1, ty0, ty1 = int(x0), int(x1), int(y0), int(y1)
     tiles = [(tx, ty) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)]
-    cache_dir = a.output + ".cache"
+    cache_dir = cache_dir_for(a.output)
     os.makedirs(cache_dir, exist_ok=True)
     files = {t: os.path.join(cache_dir, "%d_%d_%d.png" % (z, t[0], t[1])) for t in tiles}
     cached = {t: (os.path.exists(files[t]) and not a.force) for t in tiles}

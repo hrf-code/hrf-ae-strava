@@ -104,6 +104,9 @@ def script_dirs():
 
 
 def find_data(path):
+    """Plik danych aktywności: z pola/CONFIG, ze zmiennej środowiskowej HRF_DATA (ustawia ją program HRF.pyw)
+    albo najnowszy *_hrf.json w data/<projekt>/ (lub bezpośrednio w data/)."""
+    path = path or os.environ.get("HRF_DATA", "")
     if path:
         path = bpy.path.abspath(path)
         if not os.path.isfile(path):
@@ -116,7 +119,7 @@ def find_data(path):
         for sub in (os.path.join(d, "..", "data"), os.path.join(d, "data"), d):
             sub = os.path.normpath(sub)
             searched.append(sub)
-            cands = glob.glob(os.path.join(sub, "*_hrf.json"))
+            cands = glob.glob(os.path.join(sub, "*_hrf.json")) + glob.glob(os.path.join(sub, "*", "*_hrf.json"))
             if cands:
                 return max(cands, key=os.path.getmtime)
     raise RuntimeError("Nie znaleziono pliku *_hrf.json (szukano w: %s). Wskaż plik w panelu (Plik danych) albo w CONFIG['DATA_PATH']."
@@ -795,6 +798,13 @@ def _local_timer():
     return None
 
 
+def _log_path(out):
+    """Log generatora w folderze cache/ projektu (bez zaśmiecania folderu z wynikami)."""
+    d = os.path.join(os.path.dirname(os.path.abspath(out)), "cache")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, os.path.basename(out) + ".log")
+
+
 def _start_job(scene, args, log, prop, ok_msg, start_msg):
     if LOCAL["proc"] is not None and LOCAL["proc"].poll() is None:
         raise RuntimeError("Generator już działa – poczekaj na koniec.")
@@ -827,9 +837,9 @@ def start_local_generation(scene, bbox=None, out=None):
     ok = ("Gotowe – tekstura lokalna wczytana." if p.local_save_png else "Gotowe – zapisano PDF/SVG wycinka (bez PNG).")
     if saved:
         ok += " Poprzednie pliki: *.bak."
-    _start_job(scene, args, out + ".log", "local_status", ok,
+    _start_job(scene, args, _log_path(out), "local_status", ok,
                "Generuję teksturę lokalną (%.1f x %.1f km, PNG %d px)..." % (wm / 1000.0, hm / 1000.0, prm["width"]))
-    return out + ".log"
+    return _log_path(out)
 
 
 def global_command(scene, python=None, out=None):
@@ -864,9 +874,9 @@ def start_global_generation(scene, out=None):
         raise RuntimeError("Generator już działa – poczekaj na koniec.")
     saved = _backup_existing(out, [".png", ".pdf", ".svg", ".meta.json"])
     ok = "Gotowe – tekstura globalna wczytana." + (" Poprzednie pliki: *.bak." if saved else "")
-    _start_job(scene, [_python_exe(), tool, STATE["T"]["terrain_path"], out] + args, out + ".log", "global_status", ok,
+    _start_job(scene, [_python_exe(), tool, STATE["T"]["terrain_path"], out] + args, _log_path(out), "global_status", ok,
                "Generuję teksturę globalną...")
-    return out + ".log"
+    return _log_path(out)
 
 
 def p_major_invalid(p):

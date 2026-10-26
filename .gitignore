@@ -1,9 +1,7 @@
-data/*.json
-data/*.gpx
-data/*.fit
-data/*.gz
-data/hrf_contours.*
-data/hrf_local*
+# Dane aktywnosci (slad GPS, teren, warstwice, cache) - prywatne, zostaja na dysku, nie ida na GitHub
+data/*
+!data/README.md
+
 *.cache/
 __pycache__/
 

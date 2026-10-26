@@ -18,7 +18,7 @@ Co widać w trakcie:
   - przetwarzanie z postępem i podsumowanie (liczba obiektów, rozmiar pliku, czas).
 
 Przerwanie: Ctrl+C w dowolnej chwili. Odcinki już pobrane zostają w pamięci podręcznej
-(<plik wyjściowy>.cache) – ponowne uruchomienie dociąga tylko brakujące.
+(<folder pliku wyjściowego>/cache/) – ponowne uruchomienie dociąga tylko brakujące.
 
 Opcje:
   --radius M     pas wokół trasy w metrach (domyślnie 150)
@@ -49,7 +49,7 @@ SERVERS = [
 EARTH_R = 6371000.0
 QUERY_EPS_M = 15.0   # tolerancja uproszczenia linii w zapytaniu, m
 W = 64
-TTY = sys.stdout.isatty()
+TTY = sys.stdout.isatty() or os.environ.get("HRF_LIVE") == "1"
 SPIN = "|/-\\"
 
 
@@ -358,6 +358,21 @@ def join_rings(members):
     return rings
 
 
+def cache_dir_for(output):
+    """Pamięć podręczna obok pliku wyjściowego, w podfolderze cache/ (porządek w folderze projektu).
+    Stary układ (<plik>.cache) jest przenoszony automatycznie."""
+    base = os.path.splitext(os.path.basename(output))[0]
+    new = os.path.join(os.path.dirname(os.path.abspath(output)), "cache", base)
+    old = output + ".cache"
+    if os.path.isdir(old) and not os.path.isdir(new):
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        try:
+            os.replace(old, new)
+        except OSError:
+            return old
+    return new
+
+
 def chunk_cache_name(i, chunk, radius):
     """Nazwa pliku cache zależy od geometrii odcinka i promienia – zmiana --chunk/--radius nie użyje cudzych danych."""
     h = hashlib.md5(("%d|" % radius + ";".join("%.5f,%.5f" % (p[0], p[1]) for p in chunk)).encode("ascii")).hexdigest()[:8]
@@ -420,7 +435,7 @@ def main():
 
     # ----- 2. plan
     ui_head("2. Plan pobierania")
-    cache_dir = a.output + ".cache"
+    cache_dir = cache_dir_for(a.output)
     os.makedirs(cache_dir, exist_ok=True)
     files = [os.path.join(cache_dir, chunk_cache_name(i, ch, a.radius)) for i, ch in enumerate(chunks)]
     cached = [os.path.exists(fp) and not a.force for fp in files]

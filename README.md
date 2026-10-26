@@ -9,16 +9,26 @@ Nakładka danych (prędkość, tętno, wysokość, mapa, mini mapa 3D, profil…
 - **Python 3** (Windows: `py`) do konwertera. Dla plików FIT potrzebny `fitparse`
   (`py -m pip install fitparse`; skrypt sam zapyta o instalację).
 
-## Przepływ pracy
+## Najszybciej: program z oknem (`HRF.pyw`)
+`py HRF.pyw` (albo dwuklik) otwiera jedno okno ze wszystkimi narzędziami w zakładkach w kolejności pracy: **Dane** (FIT/GPX → JSON),
+**Teren**, **Warstwice**, **Wycinek lokalny**, **OSM**, **Blender** (uruchamia scenę dla wybranego projektu), **After Effects**
+(instrukcja i ścieżki). U góry wybierasz projekt (podfolder `data/`), pasek pokazuje, których plików jeszcze brakuje.
+Najedź myszą na dowolne pole lub przycisk – pojawia się podpowiedź, co dokładnie robi. Wynik narzędzi, postęp i błędy są w dolnym
+logu, przycisk **Anuluj zadanie** przerywa pracę w dowolnej chwili (pobrane dane zostają w `cache/`). Przed każdym połączeniem
+z internetem okno mówi, co zostanie wysłane. Program tylko uruchamia skrypty z `tools/` – to te same komendy, które opisano niżej
+i które można wołać ręcznie. Wymaga samego Pythona 3 z tkinter.
+
+## Przepływ pracy (ręcznie, z terminala)
+Każda aktywność ma własny folder `data/<projekt>/` (opis w `data/README.md`).
 1. Pobierz ze Stravy `.fit` / `.gpx` (aktywność → „⋯” → Eksportuj oryginał / Eksportuj GPX)
-   i wrzuć do `data/`.
-2. `py tools/hrf_converter.py` – przeszukuje folder `data/`, tworzy `<nazwa>_hrf.json`
-   (można też podać plik lub folder jako argument).
+   i wrzuć do `data/<projekt>/zrodlo/`.
+2. `py tools/hrf_converter.py data/<projekt>/zrodlo/<plik>.fit -o data/<projekt>/<projekt>_hrf.json` – tworzy dane aktywności
+   (bez argumentów przeszukuje folder `data/`).
    Sumy można wyrównać do Stravy: `--ascent 902 --moving-time 12216 --distance 59.6`.
 3. W After Effects uruchom `AE/hrf_ae_panel.jsx`.
    „Wczytaj dane…” → wskaż `*_hrf.json`; zaznacz wideo w panelu Projekt → „Dodaj klip…”.
    „Odśwież dane” podmienia wartości we wszystkich klipach.
-4. (opcjonalnie) otoczenie z OSM: `py tools/hrf_osm_fetch.py data/<nazwa>_hrf.json data/hrf_osm.json`,
+4. (opcjonalnie) otoczenie z OSM: `py tools/hrf_osm_fetch.py data/<projekt>/<projekt>_hrf.json data/<projekt>/hrf_osm.json`,
    potem w panelu zaznacz „Otoczenie z OSM”. Narzędzie pokazuje plan (ile odcinków z pamięci podręcznej,
    ile do pobrania) i pyta o zgodę, a w trakcie postęp, próby, błędy i szacowany czas.
    **Ctrl+C przerywa w dowolnej chwili**, a ponowne uruchomienie dociąga tylko brakujące odcinki
@@ -46,12 +56,12 @@ w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym 
   „N klatek = X s | prędkość | okno od–do min”. Zmiana czasu przelicza animację sama po ok. 0,7 s. Limit 36000 klatek (20 min
   przy 30 fps): np. cała 4-godzinna jazda w 1:1 to ponad 400 tys. klatek, więc zwiększ przyspieszenie lub zawęź okno.
 - `EXAG` – przewyższenie terenu i trasy (1 = skala rzeczywista, domyślnie 1,5 = czytelne i naturalne, 3 = mocno przesadzone).
-- **Teren (sama geometria, bez tekstur):** `py tools/hrf_terrain_fetch.py data/<nazwa>_hrf.json data/hrf_terrain.json`
+- **Teren (sama geometria, bez tekstur):** `py tools/hrf_terrain_fetch.py data/<projekt>/<projekt>_hrf.json data/<projekt>/hrf_terrain.json`
   pobiera wysokości z otwartych kafelków (Mapzen/AWS Terrain Tiles) z planem, postępem i Ctrl+C jak narzędzie OSM
-  (`--zoom 13`, `--step 25`, `--margin 1500`). Skrypt Blendera sam znajdzie `data/hrf_terrain.json`, zbuduje siatkę terenu,
+  (`--zoom 13`, `--step 25`, `--margin 1500`). Skrypt Blendera sam znajdzie `hrf_terrain.json` w folderze projektu, zbuduje siatkę terenu,
   przyklei do niej trasę i doda światło. `TERRAIN = "off"` wyłącza teren, `TERRAIN_SKIP` odchudza siatkę.
   Do serwera trafiają tylko numery kafelków obejmujących obszar trasy. Źródło wysokości podaj przy publikacji.
-- **Warstwice na terenie (edytowalne):** `py tools/hrf_contours.py data/hrf_terrain.json data/hrf_contours` tworzy
+- **Warstwice na terenie (edytowalne):** `py tools/hrf_contours.py data/<projekt>/hrf_terrain.json data/<projekt>/hrf_contours` tworzy
   `hrf_contours.pdf` i `.svg` (wektor: czarne tło, białe ścieżki; SVG ma nazwane grupy warstwic pomocniczych i głównych)
   oraz `.png` (tekstura). Edytujesz PDF/SVG (Illustrator, Inkscape), eksportujesz PNG **o tych samych proporcjach
   i planszy**, a w panelu Blendera wybierasz Styl terenu → „Warstwice (tekstura)” i wskazujesz PNG („Wczytaj teksturę ponownie”
@@ -59,10 +69,10 @@ w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym 
 - **Tekstura lokalna (z bliska):** globalny PNG warstwic ma jedną rozdzielczość na cały teren, więc przy kamerze blisko trasy linie są
   grube i poszarpane. W panelu (Teren → styl „Warstwice” → „Tekstura lokalna”) przycisk **Kopiuj komendę** liczy wycinek z bieżącego
   okna czasu (trasa pokazana w animacji + „Margines wycinka”) i kopiuje do schowka gotową komendę; **Wygeneruj teraz** uruchamia ją
-  w tle. Komenda `py tools/hrf_local_texture.py --bbox LAT_S,LAT_N,LNG_W,LNG_E --out data/hrf_local ...` pobiera drobniejsze wysokości
+  w tle. Komenda `py tools/hrf_local_texture.py --bbox LAT_S,LAT_N,LNG_W,LNG_E --out data/<projekt>/hrf_local ...` pobiera drobniejsze wysokości
   tylko dla wycinka (kafelki z=14, oczko do 5 m), rysuje gładkie warstwice (co 10 m) i PNG do 8192 px z plikiem zasięgu
   `hrf_local.meta.json`. Skrypt Blendera sam nakłada ją na globalną teksturę w obrębie wycinka (przycisk „Wczytaj teksturę ponownie”).
-  Wycinek `--bbox` przyjmuje też `tools/hrf_terrain_fetch.py` (`-` zamiast pliku trasy). Pliki `data/hrf_local*` są poza gitem.
+  Wycinek `--bbox` przyjmuje też `tools/hrf_terrain_fetch.py` (`-` zamiast pliku trasy). Cały folder `data/` jest poza gitem.
 - **Panel „Tekstura globalna (cały teren)”** i **„Tekstura lokalna”**: pola „Zapisz PNG” i „Zapisz PDF/SVG” (PDF/SVG do edycji, PNG
   do Blendera), przyciski „Kopiuj komendę” i „Wygeneruj teraz” (w tle, z paskiem stanu). Globalna: odstęp warstwic, główne,
   szerokość PNG (bez internetu); lokalna: wycinek z okna czasu (z internetem na drobniejsze kafelki). Istniejące pliki
@@ -76,15 +86,17 @@ w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym 
 ## Struktura
 ```
 hrf-ae-strava/
+├─ HRF.pyw                       # jedno okno (tkinter) do wszystkich narzędzi, z podpowiedziami
 ├─ AE/hrf_ae_panel.jsx           # aktualny panel (v14.x), ExtendScript (ES3: bez let/const/=>/JSON)
 ├─ tools/
 │  ├─ hrf_converter.py           # FIT/GPX → JSON
 │  ├─ hrf_osm_fetch.py           # drogi/budynki/woda/zieleń z Overpass API
 │  ├─ hrf_terrain_fetch.py       # wysokości terenu wokół trasy (dla Blendera)
-│  └─ hrf_contours.py            # warstwice z terenu: PDF/SVG (edycja) + PNG (tekstura)
+│  ├─ hrf_contours.py            # warstwice z terenu: PDF/SVG (edycja) + PNG (tekstura)
+│  └─ hrf_local_texture.py       # wysokości + warstwice tylko dla wycinka (tekstura z bliska)
 ├─ Blender/hrf_blender_route.py   # scena 3D z trasy: wysokość, strzałka, kamera (chase / orbit)
 ├─ archive/                      # starszy skrypt jednorazowy (bez panelu)
-└─ data/                         # pliki z danymi (poza gitem: zawierają ślad GPS)
+└─ data/<projekt>/               # jeden folder na aktywność (poza gitem: ślad GPS); opis w data/README.md
 ```
 
 ## Kluczowe decyzje
