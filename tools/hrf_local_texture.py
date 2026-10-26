@@ -21,6 +21,7 @@ Opcje:
   --minor M, --major M   odstępy warstwic (domyślnie 10 i 50 m)
   --png-width N    szerokość PNG w pikselach (domyślnie 6144)
   --vector         zapisz też PDF i SVG tego wycinka (do edycji)
+  --no-png         nie rysuj PNG (np. gdy chcesz sam PDF/SVG; razem z --vector)
   --yes            nie pytaj o zgodę
 Przerwanie: Ctrl+C w dowolnej chwili (pobrane kafelki zostają w pamięci podręcznej).
 """
@@ -60,12 +61,17 @@ def main():
     ap.add_argument("--major", type=float, default=50.0)
     ap.add_argument("--png-width", type=int, default=6144)
     ap.add_argument("--vector", action="store_true")
+    ap.add_argument("--no-png", action="store_true")
     ap.add_argument("--yes", action="store_true")
     a = ap.parse_args()
 
     terrain_file = a.out + "_terrain.json"
     tf_args = ["-", terrain_file, "--bbox", a.bbox, "--zoom", str(a.zoom), "--step", str(a.step)]
-    ct_args = [terrain_file, a.out, "--minor", str(a.minor), "--major", str(a.major), "--png-width", str(a.png_width)]
+    if a.no_png and not a.vector:
+        print("Nic do zapisania: --no-png bez --vector.")
+        return 1
+    ct_args = [terrain_file, a.out, "--minor", str(a.minor), "--major", str(a.major),
+               "--png-width", str(0 if a.no_png else a.png_width)]
     if not a.vector:
         ct_args += ["--no-pdf", "--no-svg"]
     if a.yes:
@@ -83,7 +89,10 @@ def main():
     if rc:
         return rc
     print("")
-    print("Gotowe. W Blenderze: Teren → Tekstura lokalna → „Wczytaj teksturę ponownie” (albo uruchom skrypt od nowa).")
+    if a.no_png:
+        print("Gotowe: PDF/SVG w %s.pdf / .svg. Po edycji wyeksportuj PNG o tych samych proporcjach (obok pliku %s.meta.json)." % (a.out, a.out))
+    else:
+        print("Gotowe. W Blenderze: Teren → Tekstura lokalna → „Wczytaj teksturę ponownie” (albo uruchom skrypt od nowa).")
     return 0
 
 

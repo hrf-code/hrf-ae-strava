@@ -63,6 +63,10 @@ w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym 
   tylko dla wycinka (kafelki z=14, oczko do 5 m), rysuje gładkie warstwice (co 10 m) i PNG do 8192 px z plikiem zasięgu
   `hrf_local.meta.json`. Skrypt Blendera sam nakłada ją na globalną teksturę w obrębie wycinka (przycisk „Wczytaj teksturę ponownie”).
   Wycinek `--bbox` przyjmuje też `tools/hrf_terrain_fetch.py` (`-` zamiast pliku trasy). Pliki `data/hrf_local*` są poza gitem.
+- **Panel „Tekstura globalna (cały teren)”** i **„Tekstura lokalna”**: pola „Zapisz PNG” i „Zapisz PDF/SVG” (PDF/SVG do edycji, PNG
+  do Blendera), przyciski „Kopiuj komendę” i „Wygeneruj teraz” (w tle, z paskiem stanu). Globalna: odstęp warstwic, główne,
+  szerokość PNG (bez internetu); lokalna: wycinek z okna czasu (z internetem na drobniejsze kafelki). Istniejące pliki
+  (np. edytowany w Illustratorze PDF) dostają kopię `*.bak` ze znacznikiem czasu przed nadpisaniem.
 - **Animowanie parametrów:** pola panelu (odległość od celu, wysokość kamery, okrążenia, start orbity, grubość linii, rozmiar strzałki…)
   animujesz normalnie: najedź na pole i wciśnij `I` (klatki widać w Dope Sheet → Scene). Orbita, grubość linii i rozmiar strzałki
   liczą **drivery** czytające te pola, więc zmiana czasu, „Przelicz animację” ani przebudowa sceny nie kasują kluczy.

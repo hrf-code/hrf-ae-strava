@@ -730,12 +730,36 @@ def local_command(scene, python=None, bbox=None, out=None):
     exe = python or ("py" if os.name == "nt" else "python3")
     quote = (lambda x: '"%s"' % x) if " " in exe else (lambda x: x)
     bb = "%.6f,%.6f,%.6f,%.6f" % (lat_s, lat_n, lng_w, lng_e)
-    cmd = '%s "%s" --bbox %s --out "%s" --zoom %d --step %d --minor %d --major %d --png-width %d --yes' % (
+    p = scene.hrf
+    if not p.local_save_png and not p.local_save_vector:
+        raise RuntimeError("Zaznacz co najmniej jedno: Zapisz PNG albo Zapisz PDF/SVG.")
+    cmd = '%s "%s" --bbox %s --out "%s" --zoom %d --step %d --minor %d --major %d --png-width %d' % (
         quote(exe), tool, bb, out, prm["zoom"], prm["step"], prm["minor"], prm["major"], prm["width"])
+    if not p.local_save_png:
+        cmd += " --no-png"
+    if p.local_save_vector:
+        cmd += " --vector"
+    cmd += " --yes"
     return cmd, (tool, out, bb, prm, wm, hm)
 
 
-LOCAL = {"proc": None, "scene": None, "log": None}
+LOCAL = {"proc": None, "scene": None, "log": None, "prop": "local_status", "ok": ""}
+
+
+def _backup_existing(out, exts):
+    """Istniejące pliki, które zostaną nadpisane (np. PDF/SVG edytowany w Illustratorze), dostają kopię .bak ze znacznikiem czasu."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    saved = []
+    for ext in exts:
+        f = out + ext
+        if os.path.isfile(f):
+            bak = "%s%s.%s.bak" % (out, ext, stamp)
+            try:
+                os.replace(f, bak)
+                saved.append(os.path.basename(bak))
+            except OSError:
+                pass
+    return saved
 
 
 def _local_timer():
@@ -743,6 +767,7 @@ def _local_timer():
     if pr is None:
         return None
     sc = bpy.data.scenes.get(LOCAL["scene"] or "")
+    prop = LOCAL["prop"]
     last = ""
     try:
         with open(LOCAL["log"], "rb") as f:
@@ -754,39 +779,98 @@ def _local_timer():
         pass
     if pr.poll() is None:
         if sc is not None:
-            sc.hrf.local_status = "Generuję teksturę lokalną... " + last[:60]
+            setattr(sc.hrf, prop, "Generuję... " + last[:70])
         return 1.0
     rc = pr.returncode
     LOCAL["proc"] = None
     if sc is not None:
         if rc == 0:
-            sc.hrf.local_status = "Gotowe – tekstura lokalna wczytana."
+            setattr(sc.hrf, prop, LOCAL["ok"])
             try:
                 apply_terrain_style(sc)
             except Exception:
                 traceback.print_exc()
         else:
-            sc.hrf.local_status = "Błąd generatora (kod %s): %s" % (rc, last[:80])
+            setattr(sc.hrf, prop, "Błąd generatora (kod %s): %s" % (rc, last[:80]))
     return None
 
 
-def start_local_generation(scene, bbox=None, out=None):
+def _start_job(scene, args, log, prop, ok_msg, start_msg):
     if LOCAL["proc"] is not None and LOCAL["proc"].poll() is None:
         raise RuntimeError("Generator już działa – poczekaj na koniec.")
+    fh = open(log, "wb")
+    LOCAL["proc"] = subprocess.Popen(args, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    LOCAL["scene"], LOCAL["log"], LOCAL["prop"], LOCAL["ok"] = scene.name, log, prop, ok_msg
+    setattr(scene.hrf, prop, start_msg)
+    bpy.app.timers.register(_local_timer, first_interval=1.0)
+
+
+def _python_exe():
+    return sys.executable if sys.executable and os.path.isfile(sys.executable) else ("py" if os.name == "nt" else "python3")
+
+
+def start_local_generation(scene, bbox=None, out=None):
     cmd_text, (tool, out, bb, prm, wm, hm) = local_command(scene, bbox=bbox, out=out)
     if not os.path.isfile(tool):
         raise RuntimeError("Nie znaleziono narzędzia: " + tool)
-    exe = sys.executable if sys.executable and os.path.isfile(sys.executable) else ("py" if os.name == "nt" else "python3")
-    args = [exe, tool, "--bbox", bb, "--out", out, "--zoom", str(prm["zoom"]), "--step", str(prm["step"]),
-            "--minor", str(prm["minor"]), "--major", str(prm["major"]), "--png-width", str(prm["width"]), "--yes"]
-    width = prm["width"]
-    log = out + ".log"
-    fh = open(log, "wb")
-    LOCAL["proc"] = subprocess.Popen(args, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-    LOCAL["scene"], LOCAL["log"] = scene.name, log
-    scene.hrf.local_status = "Generuję teksturę lokalną (%.1f x %.1f km, PNG %d px)..." % (wm / 1000.0, hm / 1000.0, width)
-    bpy.app.timers.register(_local_timer, first_interval=1.0)
-    return log
+    p = scene.hrf
+    args = [_python_exe(), tool, "--bbox", bb, "--out", out, "--zoom", str(prm["zoom"]), "--step", str(prm["step"]),
+            "--minor", str(prm["minor"]), "--major", str(prm["major"]), "--png-width", str(prm["width"])]
+    if not p.local_save_png:
+        args.append("--no-png")
+    if p.local_save_vector:
+        args.append("--vector")
+    args.append("--yes")
+    if LOCAL["proc"] is not None and LOCAL["proc"].poll() is None:
+        raise RuntimeError("Generator już działa – poczekaj na koniec.")
+    saved = _backup_existing(out, [".png", ".pdf", ".svg", ".meta.json"])
+    ok = ("Gotowe – tekstura lokalna wczytana." if p.local_save_png else "Gotowe – zapisano PDF/SVG wycinka (bez PNG).")
+    if saved:
+        ok += " Poprzednie pliki: *.bak."
+    _start_job(scene, args, out + ".log", "local_status", ok,
+               "Generuję teksturę lokalną (%.1f x %.1f km, PNG %d px)..." % (wm / 1000.0, hm / 1000.0, prm["width"]))
+    return out + ".log"
+
+
+def global_command(scene, python=None, out=None):
+    """Komenda generatora GLOBALNEJ tekstury warstwic (cały teren) z ustawień panelu."""
+    T = STATE["T"]
+    p = scene.hrf
+    if not T or not T.get("terrain_path"):
+        raise RuntimeError("Brak pliku terenu – zbuduj scenę z terenem.")
+    if not p.global_save_png and not p.global_save_vector:
+        raise RuntimeError("Zaznacz co najmniej jedno: Zapisz PNG albo Zapisz PDF/SVG.")
+    here = script_dirs()[0] if script_dirs() else os.getcwd()
+    tool = os.path.normpath(os.path.join(here, "..", "tools", "hrf_contours.py"))
+    out = out or os.path.join(os.path.dirname(os.path.abspath(T["path"])), "hrf_contours")
+    exe = python or ("py" if os.name == "nt" else "python3")
+    quote = (lambda x: '"%s"' % x) if " " in exe else (lambda x: x)
+    args = ["--minor", "%g" % p.global_minor, "--major", "%g" % p.global_major,
+            "--png-width", str(p.global_width if p.global_save_png else 0)]
+    if not p.global_save_vector:
+        args += ["--no-pdf", "--no-svg"]
+    args.append("--yes")
+    cmd = '%s "%s" "%s" "%s" %s' % (quote(exe), tool, T["terrain_path"], out, " ".join(args))
+    return cmd, (tool, out, args)
+
+
+def start_global_generation(scene, out=None):
+    cmd, (tool, out, args) = global_command(scene, out=out)
+    if not os.path.isfile(tool):
+        raise RuntimeError("Nie znaleziono narzędzia: " + tool)
+    if p_major_invalid(scene.hrf):
+        raise RuntimeError("Odstęp głównych warstwic musi być wielokrotnością odstępu pomocniczych.")
+    if LOCAL["proc"] is not None and LOCAL["proc"].poll() is None:
+        raise RuntimeError("Generator już działa – poczekaj na koniec.")
+    saved = _backup_existing(out, [".png", ".pdf", ".svg", ".meta.json"])
+    ok = "Gotowe – tekstura globalna wczytana." + (" Poprzednie pliki: *.bak." if saved else "")
+    _start_job(scene, [_python_exe(), tool, STATE["T"]["terrain_path"], out] + args, out + ".log", "global_status", ok,
+               "Generuję teksturę globalną...")
+    return out + ".log"
+
+
+def p_major_invalid(p):
+    return p.global_minor <= 0 or abs(p.global_major / p.global_minor - round(p.global_major / p.global_minor)) > 1e-6
 
 
 def make_terrain(T, cfg, col):
@@ -1381,6 +1465,21 @@ class HRFProps(bpy.types.PropertyGroup):
                                 description="O ile szerszy od pokazywanej trasy jest wycinek tekstury lokalnej")
     local_texture: StringProperty(name="PNG lokalny", subtype="FILE_PATH", default="", update=_upd_terrain_style,
                                   description="Puste = hrf_local.png obok danych trasy (wraz z hrf_local.meta.json)")
+    local_save_png: BoolProperty(name="Zapisz PNG", default=True,
+                                 description="Rysuje PNG wycinka (tekstura, którą Blender nakłada na teren)")
+    local_save_vector: BoolProperty(name="Zapisz PDF/SVG", default=False,
+                                    description="Zapisuje też wektorowy PDF i SVG wycinka do edycji (Illustrator, Inkscape)")
+    global_minor: FloatProperty(name="Warstwice co (m)", default=25.0, min=1.0, soft_max=100.0,
+                                description="Odstęp warstwic pomocniczych w teksturze globalnej")
+    global_major: FloatProperty(name="Główne co (m)", default=100.0, min=1.0, soft_max=500.0,
+                                description="Odstęp warstwic głównych (wielokrotność odstępu pomocniczych)")
+    global_width: IntProperty(name="PNG szerokość (px)", default=4096, min=512, max=16384,
+                              description="Szerokość PNG całego terenu w pikselach")
+    global_save_png: BoolProperty(name="Zapisz PNG", default=True)
+    global_save_vector: BoolProperty(name="Zapisz PDF/SVG", default=False,
+                                     description="Zapisuje też wektorowy PDF i SVG całego terenu do edycji")
+    global_cmd: StringProperty(name="Komenda globalna", default="")
+    global_status: StringProperty(name="Stan tekstury globalnej", default="")
     local_cmd: StringProperty(name="Komenda", default="")
     local_status: StringProperty(name="Stan tekstury lokalnej", default="")
     terrain_color: FloatVectorProperty(name="Teren", subtype="COLOR", size=3, min=0.0, max=1.0,
@@ -1495,6 +1594,29 @@ class HRF_OT_local_run(bpy.types.Operator):
 
     def execute(self, context):
         return _run_op(self, lambda: start_local_generation(context.scene), lambda log: "Uruchomiono generator (log: %s)" % log)
+
+
+class HRF_OT_global_command(bpy.types.Operator):
+    bl_idname = "hrf.global_command"
+    bl_label = "Kopiuj komendę (cały teren)"
+    bl_description = "Kopiuje do schowka komendę generatora globalnej tekstury warstwic (wklej w terminalu)"
+
+    def execute(self, context):
+        def go():
+            cmd, _ = global_command(context.scene)
+            context.scene.hrf.global_cmd = cmd
+            context.window_manager.clipboard = cmd
+        return _run_op(self, go, "Komenda w schowku")
+
+
+class HRF_OT_global_run(bpy.types.Operator):
+    bl_idname = "hrf.global_run"
+    bl_label = "Wygeneruj teraz (cały teren)"
+    bl_description = ("Rysuje globalną teksturę warstwic całego terenu w tle (bez internetu); istniejące pliki "
+                      "hrf_contours.* dostają kopię .bak")
+
+    def execute(self, context):
+        return _run_op(self, lambda: start_global_generation(context.scene), lambda log: "Uruchomiono generator (log: %s)" % log)
 
 
 class HRF_OT_reload_texture(bpy.types.Operator):
@@ -1653,11 +1775,30 @@ class HRF_PT_terrain(_Sub, bpy.types.Panel):
             if p.terrain_style == "contours":
                 lay.prop(p, "terrain_texture")
                 lay.operator("hrf.reload_texture", icon="FILE_REFRESH")
+                gb = lay.box()
+                gb.label(text="Tekstura globalna (cały teren)", icon="WORLD")
+                row = gb.row(align=True)
+                row.prop(p, "global_minor")
+                row.prop(p, "global_major")
+                gb.prop(p, "global_width")
+                row = gb.row(align=True)
+                row.prop(p, "global_save_png")
+                row.prop(p, "global_save_vector")
+                row = gb.row(align=True)
+                row.operator("hrf.global_command", icon="COPYDOWN")
+                row.operator("hrf.global_run", icon="PLAY")
+                if p.global_cmd:
+                    gb.prop(p, "global_cmd", text="")
+                if p.global_status:
+                    gb.label(text=p.global_status)
                 box = lay.box()
                 box.label(text="Tekstura lokalna (wycinek z okna czasu)", icon="TEXTURE")
                 box.prop(p, "local_use")
                 box.prop(p, "local_margin")
                 box.prop(p, "local_texture")
+                row = box.row(align=True)
+                row.prop(p, "local_save_png")
+                row.prop(p, "local_save_vector")
                 row = box.row(align=True)
                 row.operator("hrf.local_command", icon="COPYDOWN")
                 row.operator("hrf.local_run", icon="PLAY")
@@ -1681,7 +1822,7 @@ class HRF_PT_render(_Sub, bpy.types.Panel):
 
 
 CLASSES = [HRFProps, HRF_OT_rebuild, HRF_OT_apply, HRF_OT_set_speed, HRF_OT_select_pivot, HRF_OT_center_pivot,
-           HRF_OT_local_command, HRF_OT_local_run, HRF_OT_reload_texture, HRF_OT_render_frame, HRF_OT_render_anim,
+           HRF_OT_local_command, HRF_OT_local_run, HRF_OT_global_command, HRF_OT_global_run, HRF_OT_reload_texture, HRF_OT_render_frame, HRF_OT_render_anim,
            HRF_PT_main, HRF_PT_time, HRF_PT_camera, HRF_PT_look, HRF_PT_terrain, HRF_PT_render]
 
 
