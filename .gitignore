@@ -2,6 +2,7 @@ data/*.json
 data/*.gpx
 data/*.fit
 data/*.gz
+data/hrf_contours.*
 *.cache/
 __pycache__/
 

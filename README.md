@@ -42,6 +42,11 @@ w edytorze tekstu. Wartości w `CONFIG` na górze skryptu są punktem startowym 
   (`--zoom 13`, `--step 25`, `--margin 1500`). Skrypt Blendera sam znajdzie `data/hrf_terrain.json`, zbuduje siatkę terenu,
   przyklei do niej trasę i doda światło. `TERRAIN = "off"` wyłącza teren, `TERRAIN_SKIP` odchudza siatkę.
   Do serwera trafiają tylko numery kafelków obejmujących obszar trasy. Źródło wysokości podaj przy publikacji.
+- **Warstwice na terenie (edytowalne):** `py tools/hrf_contours.py data/hrf_terrain.json data/hrf_contours` tworzy
+  `hrf_contours.pdf` i `.svg` (wektor: czarne tło, białe ścieżki; SVG ma nazwane grupy warstwic pomocniczych i głównych)
+  oraz `.png` (tekstura). Edytujesz PDF/SVG (Illustrator, Inkscape), eksportujesz PNG **o tych samych proporcjach
+  i planszy**, a w panelu Blendera wybierasz Styl terenu → „Warstwice (tekstura)” i wskazujesz PNG („Wczytaj teksturę ponownie”
+  po każdej zmianie). Blender nie wczytuje PDF jako obrazu – dlatego PNG. Opcje: `--minor 25 --major 100 --png-width 4096`.
 - Test bez okna: `blender -b --python Blender/hrf_blender_route.py -- --start 3600 --duration 20 --render-frame 100 --render-out test.png --dark`
   (flagi: `--mode full --cam orbit --exag 4 --full-seconds 20`). Sprawdzone na Blenderze 4.4, 4.5, 5.0 i 5.2.
 
@@ -52,7 +57,8 @@ hrf-ae-strava/
 ├─ tools/
 │  ├─ hrf_converter.py           # FIT/GPX → JSON
 │  ├─ hrf_osm_fetch.py           # drogi/budynki/woda/zieleń z Overpass API
-│  └─ hrf_terrain_fetch.py       # wysokości terenu wokół trasy (dla Blendera)
+│  ├─ hrf_terrain_fetch.py       # wysokości terenu wokół trasy (dla Blendera)
+│  └─ hrf_contours.py            # warstwice z terenu: PDF/SVG (edycja) + PNG (tekstura)
 ├─ Blender/hrf_blender_route.py   # scena 3D z trasy: wysokość, strzałka, kamera (chase / orbit)
 ├─ archive/                      # starszy skrypt jednorazowy (bez panelu)
 └─ data/                         # pliki z danymi (poza gitem: zawierają ślad GPS)

@@ -60,6 +60,8 @@ CONFIG = {
     "TERRAIN": "auto",        # "auto" = data/hrf_terrain.json obok danych trasy, "off" = bez terenu, albo pełna ścieżka pliku
     "TERRAIN_SKIP": 1,        # użyj co N-tego oczka siatki terenu (1 = wszystkie; większe = lżejsza siatka)
     "TERRAIN_COLOR": (0.17, 0.19, 0.22),
+    "TERRAIN_STYLE": "gray",  # "gray" = gładki, oświetlony; "contours" = warstwice z tekstury PNG (czarne tło, białe linie, bez oświetlenia)
+    "TERRAIN_TEXTURE": "",    # PNG warstwic z tools/hrf_contours.py; puste = hrf_contours.png obok pliku terenu
     "TERRAIN_DRAPE": True,    # trasa przyklejona do terenu (wysokość z mapy terenu zamiast z GPS)
     "TERRAIN_SMOOTH_S": 2.0,  # wygładzanie wysokości trasy na terenie (połowa okna, s)
     "ROUTE_COLOR": (0.35, 0.65, 1.0),
@@ -299,7 +301,8 @@ PROP_MAP = [
     ("ORBIT_ELEV_DEG", "orbit_elev"), ("ORBIT_MARGIN", "orbit_margin"), ("ORBIT_TURNS", "orbit_turns"),
     ("ORBIT_START_DEG", "orbit_start"), ("CAM_LENS_MM", "lens"), ("CAM_BACK_M", "chase_back"),
     ("CAM_UP_M", "chase_up"), ("CAM_LOOK_AHEAD_M", "chase_ahead"), ("TERRAIN_DRAPE", "drape"),
-    ("TERRAIN_SKIP", "terrain_skip"), ("TERRAIN_COLOR", "terrain_color"), ("ROUTE_COLOR", "route_color"),
+    ("TERRAIN_SKIP", "terrain_skip"), ("TERRAIN_COLOR", "terrain_color"), ("TERRAIN_STYLE", "terrain_style"),
+    ("TERRAIN_TEXTURE", "terrain_texture"), ("ROUTE_COLOR", "route_color"),
     ("DONE_COLOR", "done_color"), ("ARROW_COLOR", "arrow_color"), ("SUN_AZIMUTH_DEG", "sun_azimuth"),
     ("SUN_ELEV_DEG", "sun_elev"), ("SUN_STRENGTH", "sun_strength"), ("DONE_SCALE", "done_scale"),
 ]
@@ -475,6 +478,70 @@ def make_arrow(name, mat, col):
     return ob
 
 
+def add_terrain_uv(me, ri, ci, R, C):
+    """UV = położenie w siatce terenu (0..1, południe u dołu, północ u góry) – pasuje do PNG z hrf_contours.py."""
+    uvl = me.uv_layers.new(name="HRF_UV")
+    nc = len(ci)
+    try:
+        import numpy as np
+        us = np.array([c / (C - 1.0) for c in ci], dtype=np.float32)
+        vs = np.array([r / (R - 1.0) for r in ri], dtype=np.float32)
+        vi = np.empty(len(me.loops), dtype=np.int32)
+        me.loops.foreach_get("vertex_index", vi)
+        uv = np.empty((len(vi), 2), dtype=np.float32)
+        uv[:, 0] = us[vi % nc]
+        uv[:, 1] = vs[vi // nc]
+        uvl.data.foreach_set("uv", uv.ravel())
+    except ImportError:
+        for li, lp in enumerate(me.loops):
+            vi = lp.vertex_index
+            uvl.data[li].uv = (ci[vi % nc] / (C - 1.0), ri[vi // nc] / (R - 1.0))
+
+
+def find_contour_texture(p, T):
+    t = bpy.path.abspath(p.terrain_texture) if p.terrain_texture else ""
+    if not t and T.get("terrain_path"):
+        t = os.path.join(os.path.dirname(os.path.abspath(T["terrain_path"])), "hrf_contours.png")
+    return t if t and os.path.isfile(t) else ""
+
+
+def apply_terrain_style(scene):
+    """Materiał terenu: gładki szary albo warstwice z tekstury (czarne tło, białe linie, bez oświetlenia)."""
+    o, T = STATE["objs"], STATE["T"]
+    if not o.get("terrain") or not T:
+        return
+    p = scene.hrf
+    mat = bpy.data.materials.get("HRF_terrain")
+    if mat is None or not mat.node_tree:
+        return
+    nt = mat.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    if p.terrain_style == "contours":
+        path = find_contour_texture(p, T)
+        if path:
+            img = bpy.data.images.load(path, check_existing=True)
+            try:
+                img.reload()                                  # po ponownym wyeksportowaniu PNG pokaże się nowa wersja
+            except Exception:
+                pass
+            tex = nt.nodes.new("ShaderNodeTexImage")
+            tex.image = img
+            tex.interpolation = "Linear"
+            tex.extension = "EXTEND"
+            em = nt.nodes.new("ShaderNodeEmission")
+            nt.links.new(tex.outputs["Color"], em.inputs["Color"])
+            nt.links.new(em.outputs[0], out.inputs[0])
+            mat.diffuse_color = (0.0, 0.0, 0.0, 1.0)
+            return
+        p.info = "Brak PNG warstwic (uruchom tools/hrf_contours.py albo wskaż plik) – teren szary"
+    bsdf = nt.nodes.new("ShaderNodeBsdfDiffuse")
+    c = p.terrain_color
+    bsdf.inputs["Color"].default_value = (c[0], c[1], c[2], 1.0)
+    nt.links.new(bsdf.outputs[0], out.inputs[0])
+    mat.diffuse_color = (c[0], c[1], c[2], 1.0)
+
+
 def make_terrain(T, cfg, col):
     tr = T["terrain"]
     g, R, C = tr["grid"], tr["rows"], tr["cols"]
@@ -508,6 +575,7 @@ def make_terrain(T, cfg, col):
     except Exception:
         for p in me.polygons:
             p.use_smooth = True
+    add_terrain_uv(me, ri, ci, R, C)
     me.materials.append(diffuse_material("HRF_terrain", cfg["TERRAIN_COLOR"]))
     ob = bpy.data.objects.new("HRF_Terrain", me)
     col.objects.link(ob)
@@ -714,6 +782,7 @@ def build_scene(scene):
     apply_look(scene)
     apply_sun(scene)
     apply_colors(scene)
+    apply_terrain_style(scene)
     key_objects(scene, cfg, T)
     key_camera(scene, cfg, T, sz)
     t0, speed, nf, fps = time_map(cfg, T)
@@ -774,6 +843,15 @@ def _upd_sun(self, context):
         traceback.print_exc()
 
 
+def _upd_terrain_style(self, context):
+    if STATE["busy"]:
+        return
+    try:
+        apply_terrain_style(context.scene)
+    except Exception:
+        traceback.print_exc()
+
+
 class HRFProps(bpy.types.PropertyGroup):
     info: StringProperty(name="Stan", default="")
     data_path: StringProperty(name="Plik danych", subtype="FILE_PATH", default="",
@@ -816,6 +894,11 @@ class HRFProps(bpy.types.PropertyGroup):
                                     default=(1.0, 1.0, 1.0), update=_upd_colors)
     arrow_color: FloatVectorProperty(name="Strzałka", subtype="COLOR", size=3, min=0.0, max=1.0,
                                      default=(1.0, 0.38, 0.05), update=_upd_colors)
+    terrain_style: EnumProperty(name="Styl terenu", default="gray", update=_upd_terrain_style, items=[
+        ("gray", "Gładki (oświetlony)", "Szary teren z cieniowaniem"),
+        ("contours", "Warstwice (tekstura)", "Czarne tło, białe warstwice z pliku PNG (tools/hrf_contours.py)")])
+    terrain_texture: StringProperty(name="PNG warstwic", subtype="FILE_PATH", default="", update=_upd_terrain_style,
+                                    description="Puste = hrf_contours.png obok pliku terenu; po edycji w Illustratorze wyeksportuj PNG o tych samych proporcjach")
     terrain_color: FloatVectorProperty(name="Teren", subtype="COLOR", size=3, min=0.0, max=1.0,
                                        default=(0.17, 0.19, 0.22), update=_upd_colors)
     sun_azimuth: FloatProperty(name="Słońce: azymut (°)", default=135.0, update=_upd_sun)
@@ -853,6 +936,15 @@ class HRF_OT_apply(bpy.types.Operator):
 
     def execute(self, context):
         return _run_op(self, lambda: apply_time_camera(context.scene), lambda n: "Animacja: %d klatek" % n)
+
+
+class HRF_OT_reload_texture(bpy.types.Operator):
+    bl_idname = "hrf.reload_texture"
+    bl_label = "Wczytaj teksturę ponownie"
+    bl_description = "Po ponownym wyeksportowaniu PNG warstwic (np. z Illustratora) odświeża materiał terenu"
+
+    def execute(self, context):
+        return _run_op(self, lambda: apply_terrain_style(context.scene), "Tekstura odświeżona")
 
 
 class HRF_OT_render_frame(bpy.types.Operator):
@@ -974,6 +1066,10 @@ class HRF_PT_terrain(_Sub, bpy.types.Panel):
             lay.prop(p, "terrain_path")
             lay.prop(p, "drape")
             lay.prop(p, "terrain_skip")
+            lay.prop(p, "terrain_style")
+            if p.terrain_style == "contours":
+                lay.prop(p, "terrain_texture")
+                lay.operator("hrf.reload_texture", icon="FILE_REFRESH")
         lay.operator("hrf.rebuild", icon="FILE_REFRESH")
 
 
@@ -989,7 +1085,7 @@ class HRF_PT_render(_Sub, bpy.types.Panel):
         lay.operator("hrf.render_anim", icon="RENDER_ANIMATION")
 
 
-CLASSES = [HRFProps, HRF_OT_rebuild, HRF_OT_apply, HRF_OT_render_frame, HRF_OT_render_anim,
+CLASSES = [HRFProps, HRF_OT_rebuild, HRF_OT_apply, HRF_OT_reload_texture, HRF_OT_render_frame, HRF_OT_render_anim,
            HRF_PT_main, HRF_PT_time, HRF_PT_camera, HRF_PT_look, HRF_PT_terrain, HRF_PT_render]
 
 
@@ -1051,7 +1147,8 @@ def _cli():
               "--duration": ("DURATION_S", float), "--exag": ("EXAG", float), "--full-seconds": ("FULL_SECONDS", float),
               "--fps": ("FPS", int), "--cam": ("CAM_MODE", str), "--turns": ("ORBIT_TURNS", float),
               "--orbit-margin": ("ORBIT_MARGIN", float), "--orbit-elev": ("ORBIT_ELEV_DEG", float),
-              "--res-x": ("RES_X", int), "--res-y": ("RES_Y", int)}
+              "--res-x": ("RES_X", int), "--res-y": ("RES_Y", int), "--terrain-style": ("TERRAIN_STYLE", str),
+              "--terrain-texture": ("TERRAIN_TEXTURE", str)}
     while i < len(argv):
         a = argv[i]
         if a in keymap and i + 1 < len(argv):
