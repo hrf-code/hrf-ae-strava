@@ -24,13 +24,31 @@ Nakładka danych (prędkość, tętno, wysokość, mapa, mini mapa 3D, profil…
    **Ctrl+C przerywa w dowolnej chwili**, a ponowne uruchomienie dociąga tylko brakujące odcinki
    (`--yes` pomija pytanie, `--force` pobiera od nowa).
 
+## Blender: trasa 3D ze strzałką i kamerą (opcjonalnie)
+`Blender/hrf_blender_route.py` buduje z tego samego pliku `*_hrf.json` scenę: ścieżka z prawdziwą wysokością (oś Z),
+strzałka jadąca po trasie i kamera. W Blenderze: zakładka Scripting → Open → ten plik → (opcjonalnie ustaw `DATA_PATH`
+w `CONFIG`) → Run Script. Potem Render → Render Animation: PNG z przezroczystością w `hrf_render/`, do nałożenia w AE.
+- `CAM_MODE = "chase"` – kamera za strzałką i nad nią (okno klipu: `START_S` + `DURATION_S`, czas rzeczywisty).
+- `CAM_MODE = "orbit"` + `MODE = "full"` – cała jazda w kadrze, kamera krąży wokół trasy (`ORBIT_TURNS`), strzałka jedzie
+  po trasie; przelot skompresowany do `FULL_SECONDS` sekund.
+- `EXAG` – przewyższenie (1 = skala rzeczywista, 3–4 wyraźnie w widoku z daleka).
+- **Teren (sama geometria, bez tekstur):** `py tools/hrf_terrain_fetch.py data/<nazwa>_hrf.json data/hrf_terrain.json`
+  pobiera wysokości z otwartych kafelków (Mapzen/AWS Terrain Tiles) z planem, postępem i Ctrl+C jak narzędzie OSM
+  (`--zoom 13`, `--step 25`, `--margin 1500`). Skrypt Blendera sam znajdzie `data/hrf_terrain.json`, zbuduje siatkę terenu,
+  przyklei do niej trasę i doda światło. `TERRAIN = "off"` wyłącza teren, `TERRAIN_SKIP` odchudza siatkę.
+  Do serwera trafiają tylko numery kafelków obejmujących obszar trasy. Źródło wysokości podaj przy publikacji.
+- Test bez okna: `blender -b --python Blender/hrf_blender_route.py -- --start 3600 --duration 20 --render-frame 100 --render-out test.png --dark`
+  (flagi: `--mode full --cam orbit --exag 4 --full-seconds 20`). Sprawdzone na Blenderze 4.4, 4.5, 5.0 i 5.2.
+
 ## Struktura
 ```
 hrf-ae-strava/
 ├─ AE/hrf_ae_panel.jsx           # aktualny panel (v14.x), ExtendScript (ES3: bez let/const/=>/JSON)
 ├─ tools/
 │  ├─ hrf_converter.py           # FIT/GPX → JSON
-│  └─ hrf_osm_fetch.py           # drogi/budynki/woda/zieleń z Overpass API
+│  ├─ hrf_osm_fetch.py           # drogi/budynki/woda/zieleń z Overpass API
+│  └─ hrf_terrain_fetch.py       # wysokości terenu wokół trasy (dla Blendera)
+├─ Blender/hrf_blender_route.py   # scena 3D z trasy: wysokość, strzałka, kamera (chase / orbit)
 ├─ archive/                      # starszy skrypt jednorazowy (bez panelu)
 └─ data/                         # pliki z danymi (poza gitem: zawierają ślad GPS)
 ```

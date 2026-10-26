@@ -7,3 +7,8 @@ __pycache__/
 
 # Pliki lokalne (testy, tymczasowe, notatki) - zostaja na dysku, nie ida na GitHub
 _local/
+
+# Blender: sceny i render zawieraja slad GPS
+*.blend
+*.blend1
+hrf_render/
